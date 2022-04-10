@@ -35,17 +35,24 @@ impl From<Ipv6Packet<Vec<u8>>> for IpPacket {
 }
 
 impl IpPacket {
-    fn src_ip(&self) -> IpAddr {
+    pub fn src_ip(&self) -> IpAddr {
         match self {
             IpPacket::V4(packet) => IpAddr::V4(Ipv4Addr::from(packet.src_addr())),
             IpPacket::V6(packet) => IpAddr::V6(Ipv6Addr::from(packet.src_addr())),
         }
     }
 
-    fn dst_ip(&self) -> IpAddr {
+    pub fn dst_ip(&self) -> IpAddr {
         match self {
             IpPacket::V4(packet) => IpAddr::V4(Ipv4Addr::from(packet.dst_addr())),
             IpPacket::V6(packet) => IpAddr::V6(Ipv6Addr::from(packet.dst_addr())),
+        }
+    }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        match self {
+            IpPacket::V4(packet) => packet.into_inner(),
+            IpPacket::V6(packet) => packet.into_inner(),
         }
     }
 }

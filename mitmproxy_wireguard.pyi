@@ -22,9 +22,13 @@ class DatagramReceived:
     data: bytes
 
 
+class Server:
+    async def tcp_read(self, connection_id: int, n: int) -> bytes:
+        pass
+
 async def start_server(
     host: str,
     port: int,
     on_event: Callable[ConnectionEstablished | DataReceived | ConnectionClosed | DatagramReceived]
-):
+) -> Server:
     ...

@@ -41,7 +41,9 @@ impl WireguardServer {
     }
 
     fn tcp_write(&self, connection_id: ConnectionId, data: Vec<u8>) -> PyResult<()> {
-        self.event_tx.send(ConnectionCommand::WriteData(connection_id, data)).context("py -> smol event queue unavailable")?;
+        self.event_tx.send(
+            ConnectionCommand::WriteData(connection_id, data)
+        ).context("py -> smol event queue unavailable")?;
         Ok(())
     }
 
@@ -54,8 +56,12 @@ impl WireguardServer {
         })
     }
 
-    fn tcp_close(&self, connection_id: ConnectionId) -> PyResult<()> {
-        todo!()
+    #[args(half_close=false)]
+    fn tcp_close(&self, connection_id: ConnectionId, half_close: bool) -> PyResult<()> {
+        self.event_tx.send(
+            ConnectionCommand::CloseConnection(connection_id, half_close)
+        ).context("py -> smol event queue unavailable")?;
+        Ok(())
     }
 
     fn stop(&self) -> PyResult<()> {

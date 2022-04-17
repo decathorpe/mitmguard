@@ -12,14 +12,15 @@ async def main():
 
     async def handle_connection(connection_id: int):
         print("handle connection task")
-        while True:
-            data = await server.tcp_read(connection_id, 4096)
-            print(f"{len(data)=} {data[:10]=} ")
-            if not data:
-                return
-            server.tcp_write(connection_id, data.upper())
-            await server.tcp_drain(connection_id)
-            print("drained.")
+
+        data = await server.tcp_read(connection_id, 4096)
+        print(f"{len(data)=} {data[:10]=} ")
+        if not data:
+            return
+        server.tcp_write(connection_id, data.upper())
+        await server.tcp_drain(connection_id)
+        print("drained.")
+        server.tcp_close(connection_id)
 
     def on_event(event):
         # simple echo server
@@ -27,8 +28,8 @@ async def main():
         if isinstance(event, mitmproxy_wireguard.ConnectionEstablished):
             print(f"{event.src_addr=}")
             loop.call_soon_threadsafe(lambda: loop.create_task(handle_connection(event.connection_id)))
-        elif isinstance(event, mitmproxy_wireguard.DataReceived):
-            pass # server.tcp_send(event.connection_id, event.data)
+        elif isinstance(event, mitmproxy_wireguard.ConnectionClosed):
+            print(f"Connection closed {event.connection_id=}")
 
     print("main")
     server = await mitmproxy_wireguard.start_server("", 51820, on_event)

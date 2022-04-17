@@ -1,13 +1,13 @@
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::future;
+use std::{fmt, future};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{anyhow, Context, Result};
 use smoltcp::{Error, time};
 use smoltcp::iface::{Interface, InterfaceBuilder, Routes, SocketHandle};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::{TcpSocket, TcpSocketBuffer};
+use smoltcp::socket::{TcpSocket, TcpSocketBuffer, TcpState};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{IpAddress, IpCidr, IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Address, Ipv6Packet, TcpPacket};
 use tokio::sync::mpsc::{Permit, Receiver, Sender, UnboundedReceiver};
@@ -189,6 +189,7 @@ impl RxToken for VirtualRxToken {
 struct SocketData {
     handle: SocketHandle,
     send_buffer: VecDeque<u8>,
+    write_eof: bool,
     recv_waiter: Option<(u32, oneshot::Sender<Vec<u8>>)>,
     drain_waiter: Vec<oneshot::Sender<()>>,
 }
@@ -270,11 +271,11 @@ impl<'a> TcpServer<'a> {
 
         if syn {
             let mut socket = TcpSocket::new(
-                TcpSocketBuffer::new(vec![0u8; 128 * 1024]),
-                TcpSocketBuffer::new(vec![0u8; 128 * 1024]),
+                TcpSocketBuffer::new(vec![0u8; 64 * 1024]),
+                TcpSocketBuffer::new(vec![0u8; 64 * 1024]),
             );
             socket.set_timeout(Some(Duration::from_secs(60)));
-            socket.set_keep_alive(Some(Duration::from_secs(60)));
+            socket.set_keep_alive(Some(Duration::from_secs(28)));
             socket.listen(dst_addr)?;
             let handle = self.iface.add_socket(socket);
 
@@ -284,6 +285,7 @@ impl<'a> TcpServer<'a> {
             let data = SocketData {
                 handle,
                 send_buffer: VecDeque::new(),
+                write_eof: false,
                 recv_waiter: None,
                 drain_waiter: Vec::new(),
             };
@@ -296,9 +298,6 @@ impl<'a> TcpServer<'a> {
                     dst_addr: dst_addr.into(),
                 }))
                 .await?;
-        } else if fin {
-            log::warn!("Unimplemented: TCP FIN");
-            // TODO: Delete socket.
         }
 
         self.iface.device_mut().receive_packet(packet);
@@ -328,14 +327,24 @@ impl<'a> TcpServer<'a> {
         Ok(())
     }
 
-    pub async fn close_connection(&mut self, id: ConnectionId) -> Result<()> {
-        // let mut data = self.socket_data.get_mut(&id).ok_or(anyhow!("unknown connection id: {}", id))?;
+    pub fn close_connection(&mut self, id: ConnectionId, half_close: bool) -> Result<()> {
+        let mut data = self.socket_data.get_mut(&id).ok_or(anyhow!("unknown connection id: {}", id))?;
         let sock = self.iface.get_socket::<TcpSocket>(data.handle);
-        todo!()
+        if half_close {
+            data.write_eof = true;
+        } else {
+            sock.abort();
+        }
+        Ok(())
     }
 
     pub async fn run(&mut self) -> Result<()> {
+
+        let mut remove_conns = Vec::new();
+
         loop {
+            dbg!(&self);
+
             let delay = self
                 .iface
                 .poll_delay(Instant::now())
@@ -364,6 +373,9 @@ impl<'a> TcpServer<'a> {
                         ConnectionCommand::DrainWriter(id, tx) => {
                             self.drain_writer(id, tx)?;
                         },
+                        ConnectionCommand::CloseConnection(id, half_close) => {
+                            self.close_connection(id, half_close)?;
+                        },
                         _ => {
                             todo!("Unimplemented: {:?}", e);
                         }
@@ -388,8 +400,9 @@ impl<'a> TcpServer<'a> {
             }
 
             for (connection_id, data) in self.socket_data.iter_mut() {
+                let sock = self.iface.get_socket::<TcpSocket>(data.handle);
                 if data.recv_waiter.is_some() {
-                    let sock = self.iface.get_socket::<TcpSocket>(data.handle);
+                    dbg!(sock.state(), sock.can_recv(), sock.may_recv());
                     if sock.can_recv() {
                         let (n, tx) = data.recv_waiter.take().unwrap();
                         let bytes_available = sock.recv_queue();
@@ -397,12 +410,18 @@ impl<'a> TcpServer<'a> {
                         let bytes_read = sock.recv_slice(&mut buf)?;
                         buf.truncate(bytes_read);
                         tx.send(buf).map_err(|_| anyhow!("cannot send read() bytes"))?;
-                    } else if !sock.may_recv() {
-                        tx.send(vec![0,0]).map_err(|_| anyhow!("cannot send read() bytes"))?;
+                    } else {
+                        match sock.state() {
+                            // can we still receive something in the future?
+                            TcpState::CloseWait | TcpState::LastAck | TcpState::Closed | TcpState::Closing | TcpState::TimeWait => {
+                                let (_, tx) = data.recv_waiter.take().unwrap();
+                                tx.send(Vec::new()).map_err(|_| anyhow!("cannot send read() bytes"))?;
+                            },
+                            _ => {}
+                        }
                     }
                 }
                 if !data.send_buffer.is_empty() {
-                    let sock = self.iface.get_socket::<TcpSocket>(data.handle);
                     if sock.can_send() {
                         let (a, b) = data.send_buffer.as_slices();
                         let sent = sock.send_slice(a)? + sock.send_slice(b)?;
@@ -410,15 +429,42 @@ impl<'a> TcpServer<'a> {
                     }
                 }
                 if !data.drain_waiter.is_empty() {
-                    let sock = self.iface.get_socket::<TcpSocket>(data.handle);
-                    if sock.can_send() {
+                    if sock.send_queue() < sock.send_capacity() {
                         for waiter in data.drain_waiter.drain(..) {
                             waiter.send(()).map_err(|_| anyhow!("cannot notify drain writer"))?;
                         }
                     }
                 }
+                if data.send_buffer.is_empty() && data.write_eof {
+                    // needs test: Is smoltcp smart enough to send out its own send buffer first?
+                    sock.close();
+                    data.write_eof = false;
+                    continue; // needs one more poll.
+                } else if sock.state() == TcpState::Closed {
+                    remove_conns.push(connection_id);
+
+                }
             }
+            for connection_id in remove_conns.drain(..) {
+                let data = self.socket_data.remove(connection_id).unwrap();
+                self.py_tx
+                        .send(py_events::Events::ConnectionClosed(ConnectionClosed {
+                            connection_id: *connection_id,
+                        }))
+                        .await?;
+                self.iface.remove_socket(data.handle);
+            }
+
         }
+    }
+}
+
+impl<'a> fmt::Debug for TcpServer<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let lst = f.debug_list().entry(&42).finish()?;
+        f.debug_struct("TcpServer")
+         .field("connections", &lst)
+         .finish()
     }
 }
 

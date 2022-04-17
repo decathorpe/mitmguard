@@ -7,11 +7,6 @@ class ConnectionEstablished:
     dst_addr: tuple
 
 
-class DataReceived:
-    connection_id: int
-    data: bytes
-
-
 class ConnectionClosed:
     connection_id: int
 
@@ -30,6 +25,9 @@ class Server:
         pass
 
     def tcp_write(self, connection_id: int, data: bytes) -> None:
+        pass
+
+    def tcp_close(self, connection_id: int, half_close: bool = False) -> None:
         pass
 
 

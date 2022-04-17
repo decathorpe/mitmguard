@@ -117,6 +117,6 @@ pub enum ConnectionCommand {
     ReadData(ConnectionId, u32, oneshot::Sender<Vec<u8>>),
     WriteData(ConnectionId, Vec<u8>),
     DrainWriter(ConnectionId, oneshot::Sender<()>),
-    CloseConnection(ConnectionId),
+    CloseConnection(ConnectionId, bool),
     SendDatagram(SocketAddr, SocketAddr, Vec<u8>),
 }

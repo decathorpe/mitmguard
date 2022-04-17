@@ -1,7 +1,7 @@
 mod py_events;
-mod tcp2;
+mod tcp;
 mod udp;
-mod wg2;
+mod wireguard;
 
 
 use std::sync::Arc;
@@ -73,13 +73,11 @@ impl WireguardServer {
 impl WireguardServer {
     pub async fn new(on_event: PyObject) -> Result<WireguardServer> {
 
-        /*
         env_logger::builder()
             .filter_level(log::LevelFilter::Debug)
             .init();
-
         console_subscriber::init();
-        */
+
 
         let server_priv_key: X25519SecretKey = "c72d788fd0916b1185177fd7fa392451192773c889d17ac739571a63482c18bb"
             .parse()
@@ -102,7 +100,7 @@ impl WireguardServer {
 
         let mut udp_server = udp::UdpServer::new("0.0.0.0:51820", udp_to_wg_tx, wg_to_udp_rx).await?;
 
-        let mut wg_server = wg2::WgServer::new(
+        let mut wg_server = wireguard::WgServer::new(
             Arc::new(server_priv_key),
             vec![(Arc::new(peer_pub_key), None)],
             wg_to_udp_tx,
@@ -111,7 +109,7 @@ impl WireguardServer {
             smol_to_wg_rx,
         )?;
 
-        let mut tcp_server = tcp2::TcpServer::new(smol_to_wg_tx, wg_to_smol_rx, smol_to_py_tx, py_to_smol_rx)?;
+        let mut tcp_server = tcp::TcpServer::new(smol_to_wg_tx, wg_to_smol_rx, smol_to_py_tx, py_to_smol_rx)?;
 
         // TODO: store handles and abort later.
         tokio::spawn(async move { udp_server.run().await });

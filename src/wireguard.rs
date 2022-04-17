@@ -11,7 +11,7 @@ use smoltcp::wire::{Ipv4Packet, Ipv6Packet};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::RwLock;
 
-use crate::tcp2::{IpPacket, NetworkCommand, NetworkEvent};
+use crate::tcp::{IpPacket, NetworkCommand, NetworkEvent};
 use crate::udp::{UdpCommand, UdpEvent};
 
 
@@ -153,7 +153,7 @@ impl WgServer {
         let mut result = peer.tunnel.decapsulate(Some(src_addr.ip()), &data, &mut self.buf);
 
         while let TunnResult::WriteToNetwork(b) = result {
-            log::debug!("WireGuard: WriteToNetwork");
+            log::debug!("process_incoming_datagram: WriteToNetwork");
             self.udp_tx.send(UdpCommand::SendDatagram(b.to_vec(), src_addr)).await?;
             // check if there are more things to be handled
             result = peer.tunnel.decapsulate(None, &[0; 0], &mut self.buf);
@@ -161,17 +161,17 @@ impl WgServer {
 
         match result {
             TunnResult::Done => {
-                log::debug!("WireGuard: Done");
+                log::debug!("process_incoming_datagram: Done");
             },
             TunnResult::Err(error) => {
-                log::error!("WireGuard Error: {:?}", error);
+                log::error!("process_incoming_datagram: Err: {:?}", error);
             },
             TunnResult::WriteToTunnelV4(buf, src_addr) => {
-                log::debug!("IPv4 source address: {}", src_addr);
-                log::debug!("{}", pretty_hex(&buf));
-
                 match Ipv4Packet::new_checked(buf.to_vec()) {
                     Ok(packet) => {
+                        log::debug!("process_incoming_datagram: WriteToTunnelV4 {} -> {} (from {})", packet.src_addr(), packet.dst_addr(), src_addr);
+                        log::trace!("{} {}", src_addr, pretty_hex(&buf));
+
                         self.peers_by_ip.insert(Ipv4Addr::from(packet.src_addr()).into(), peer);
                         match self
                             .net_tx
@@ -189,11 +189,11 @@ impl WgServer {
                 }
             },
             TunnResult::WriteToTunnelV6(buf, src_addr) => {
-                log::debug!("IPv6 source address: {}", src_addr);
-                log::debug!("{}", pretty_hex(&buf));
-
                 match Ipv6Packet::new_checked(buf.to_vec()) {
                     Ok(packet) => {
+                        log::debug!("process_incoming_datagram: WriteToTunnelV6 {} -> {} (from {})", packet.src_addr(), packet.dst_addr(), src_addr);
+                        log::trace!("{} {}", src_addr, pretty_hex(&buf));
+
                         self.peers_by_ip.insert(Ipv6Addr::from(packet.src_addr()).into(), peer);
                         match self
                             .net_tx
@@ -225,15 +225,19 @@ impl WgServer {
             })
             .unwrap();
 
+        let src_ip = packet.src_ip();
+        let dst_ip = packet.dst_ip();
+
         match peer.tunnel.encapsulate(&packet.into_inner(), &mut self.buf) {
             TunnResult::Done => {
-                log::debug!("WireGuard: Done");
+                log::debug!("process_incoming_packet: Done");
             },
             TunnResult::Err(error) => {
-                log::error!("WireGuard Error: {:?}", error);
+                log::error!("process_incoming_packet: Err: {:?}", error);
             },
             TunnResult::WriteToNetwork(buf) => {
                 let dst_addr = peer.endpoint.read().await.unwrap();
+                log::debug!("process_incoming_packet: WriteToNetwork {} -> {} (to {})", src_ip, dst_ip, dst_addr);
                 self.udp_tx
                     .send(UdpCommand::SendDatagram(buf.to_vec(), dst_addr))
                     .await?;

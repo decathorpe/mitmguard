@@ -1,7 +1,6 @@
 use std::{fmt};
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{anyhow, Result};
@@ -274,9 +273,9 @@ impl<'a> TcpServer<'a> {
                 TcpSocketBuffer::new(vec![0u8; 64 * 1024]),
                 TcpSocketBuffer::new(vec![0u8; 64 * 1024]),
             );
+            socket.listen(dst_addr)?;
             socket.set_timeout(Some(Duration::from_secs(60)));
             socket.set_keep_alive(Some(Duration::from_secs(28)));
-            socket.listen(dst_addr)?;
             let handle = self.iface.add_socket(socket);
 
             let connection_id = self.next_connection_id;
@@ -305,51 +304,47 @@ impl<'a> TcpServer<'a> {
         Ok(())
     }
 
-    pub async fn read_data(&mut self, id: ConnectionId, n: u32, tx: oneshot::Sender<Vec<u8>>) -> Result<()> {
-        let mut data = self.socket_data.get_mut(&id).ok_or(anyhow!("unknown connection id: {}", id))?;
-        if data.recv_waiter.is_some() {
-            return Err(anyhow!("Cannot register multiple recv waiter for connection {}", id));
-        } else {
+    pub fn read_data(&mut self, id: ConnectionId, n: u32, tx: oneshot::Sender<Vec<u8>>) {
+        if let Some(data) = self.socket_data.get_mut(&id) {
+            assert!(data.recv_waiter.is_none());
             data.recv_waiter = Some((n, tx));
         }
-        Ok(())
     }
 
-    pub fn write_data(&mut self, id: ConnectionId, buf: Vec<u8>) -> Result<()> {
-        let data = self.socket_data.get_mut(&id).ok_or(anyhow!("unknown connection id: {}", id))?;
-        data.send_buffer.extend(buf);
-        Ok(())
-    }
-
-    pub fn drain_writer(&mut self, id: ConnectionId, tx: oneshot::Sender<()>) -> Result<()> {
-        let data = self.socket_data.get_mut(&id).ok_or(anyhow!("unknown connection id: {}", id))?;
-        data.drain_waiter.push(tx);
-        Ok(())
-    }
-
-    pub fn close_connection(&mut self, id: ConnectionId, half_close: bool) -> Result<()> {
-        let mut data = self.socket_data.get_mut(&id).ok_or(anyhow!("unknown connection id: {}", id))?;
-        let sock = self.iface.get_socket::<TcpSocket>(data.handle);
-        if half_close {
-            data.write_eof = true;
-        } else {
-            sock.abort();
+    pub fn write_data(&mut self, id: ConnectionId, buf: Vec<u8>) {
+        if let Some(data) = self.socket_data.get_mut(&id) {
+            data.send_buffer.extend(buf);
         }
-        Ok(())
+    }
+
+    pub fn drain_writer(&mut self, id: ConnectionId, tx: oneshot::Sender<()>) {
+        if let Some(data) = self.socket_data.get_mut(&id) {
+            data.drain_waiter.push(tx);
+        }
+    }
+
+    pub fn close_connection(&mut self, id: ConnectionId, half_close: bool) {
+        if let Some(data) = self.socket_data.get_mut(&id) {
+            let sock = self.iface.get_socket::<TcpSocket>(data.handle);
+            if half_close {
+                data.write_eof = true;
+            } else {
+                sock.abort();
+            }
+        }
     }
 
     pub async fn run(&mut self) -> Result<()> {
         let mut remove_conns = Vec::new();
 
         loop {
-            dbg!(&self);
-
             let delay = self
                 .iface
                 .poll_delay(Instant::now())
                 .unwrap_or_else(|| Duration::from_secs(10));
 
-            println!("Poll: {}", &delay);
+            log::debug!("{:?}", &self);
+            log::debug!("Poll: {}", &delay);
 
             let sleep = tokio::time::sleep(delay.into());
             tokio::pin!(sleep);
@@ -366,16 +361,16 @@ impl<'a> TcpServer<'a> {
                 Some(e) = self.py_rx.recv() => {
                     match e {
                         ConnectionCommand::ReadData(id,n,tx) => {
-                            self.read_data(id,n,tx).await?;
+                            self.read_data(id,n,tx);
                         },
                         ConnectionCommand::WriteData(id, buf) => {
-                            self.write_data(id, buf)?;
+                            self.write_data(id, buf);
                         },
                         ConnectionCommand::DrainWriter(id, tx) => {
-                            self.drain_writer(id, tx)?;
+                            self.drain_writer(id, tx);
                         },
                         ConnectionCommand::CloseConnection(id, half_close) => {
-                            self.close_connection(id, half_close)?;
+                            self.close_connection(id, half_close);
                         },
                         _ => {
                             todo!("Unimplemented: {:?}", e);
@@ -389,7 +384,7 @@ impl<'a> TcpServer<'a> {
 
             loop {
                 match self.iface.poll(Instant::now()) {
-                    Ok(_b) => break,
+                    Ok(_) => break,
                     Err(Error::Exhausted) => {
                         log::debug!("smoltcp: exhausted.");
                         break;

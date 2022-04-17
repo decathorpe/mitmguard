@@ -60,20 +60,6 @@ impl ConnectionEstablished {
 
 #[pyclass]
 #[derive(Debug)]
-pub struct ConnectionClosed {
-    #[pyo3(get)]
-    pub connection_id: ConnectionId,
-}
-
-#[pymethods]
-impl ConnectionClosed {
-    fn __repr__(&self) -> String {
-        format!("ConnectionClosed({})", self.connection_id)
-    }
-}
-
-#[pyclass]
-#[derive(Debug)]
 pub struct DatagramReceived {
     #[pyo3(get)]
     pub src_addr: PySockAddr,
@@ -97,7 +83,6 @@ impl DatagramReceived {
 #[derive(Debug)]
 pub enum Events {
     ConnectionEstablished(ConnectionEstablished),
-    ConnectionClosed(ConnectionClosed),
     DatagramReceived(DatagramReceived),
 }
 
@@ -105,7 +90,6 @@ impl IntoPy<PyObject> for Events {
     fn into_py(self, py: Python<'_>) -> PyObject {
         match self {
             Events::ConnectionEstablished(e) => e.into_py(py),
-            Events::ConnectionClosed(e) => e.into_py(py),
             Events::DatagramReceived(e) => e.into_py(py),
         }
     }

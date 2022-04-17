@@ -1,21 +1,21 @@
-use std::{fmt, future};
+use std::{fmt};
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use anyhow::{anyhow, Context, Result};
-use smoltcp::{Error, time};
+use anyhow::{anyhow, Result};
+use smoltcp::{Error};
 use smoltcp::iface::{Interface, InterfaceBuilder, Routes, SocketHandle};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::{AnySocket, Socket, TcpSocket, TcpSocketBuffer, TcpState};
+use smoltcp::socket::{Socket, TcpSocket, TcpSocketBuffer, TcpState};
 use smoltcp::time::{Duration, Instant};
-use smoltcp::wire::{IpAddress, IpCidr, IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Address, Ipv6Packet, TcpPacket};
+use smoltcp::wire::{IpAddress, IpCidr, IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Packet, TcpPacket};
 use tokio::sync::mpsc::{Permit, Receiver, Sender, UnboundedReceiver};
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::oneshot;
 
-use crate::{ConnectionClosed, ConnectionCommand, ConnectionEstablished, ConnectionId, DatagramReceived, py_events};
+use tokio::sync::oneshot;
+use crate::{ConnectionCommand, ConnectionId, py_events};
+
 
 /// generic IP packet type that wraps both IPv4 and IPv6 packet buffers
 #[derive(Debug)]
@@ -158,7 +158,7 @@ impl<'a> Device<'a> for VirtualDevice {
 pub struct VirtualTxToken<'a>(Permit<'a, NetworkCommand>);
 
 impl<'a> TxToken for VirtualTxToken<'a> {
-    fn consume<R, F>(self, timestamp: Instant, len: usize, f: F) -> smoltcp::Result<R>
+    fn consume<R, F>(self, _timestamp: Instant, len: usize, f: F) -> smoltcp::Result<R>
         where
             F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
     {
@@ -267,7 +267,7 @@ impl<'a> TcpServer<'a> {
         let dst_addr = SocketAddr::new(dst_ip, tcp_packet.dst_port());
 
         let syn = tcp_packet.syn();
-        let fin = tcp_packet.fin();
+        let _fin = tcp_packet.fin();
 
         if syn {
             let mut socket = TcpSocket::new(
@@ -292,7 +292,7 @@ impl<'a> TcpServer<'a> {
             self.socket_data.insert(connection_id, data);
 
             self.py_tx
-                .send(py_events::Events::ConnectionEstablished(ConnectionEstablished {
+                .send(py_events::Events::ConnectionEstablished(py_events::ConnectionEstablished {
                     connection_id,
                     src_addr: src_addr.into(),
                     dst_addr: dst_addr.into(),
@@ -316,13 +316,13 @@ impl<'a> TcpServer<'a> {
     }
 
     pub fn write_data(&mut self, id: ConnectionId, buf: Vec<u8>) -> Result<()> {
-        let mut data = self.socket_data.get_mut(&id).ok_or(anyhow!("unknown connection id: {}", id))?;
+        let data = self.socket_data.get_mut(&id).ok_or(anyhow!("unknown connection id: {}", id))?;
         data.send_buffer.extend(buf);
         Ok(())
     }
 
     pub fn drain_writer(&mut self, id: ConnectionId, tx: oneshot::Sender<()>) -> Result<()> {
-        let mut data = self.socket_data.get_mut(&id).ok_or(anyhow!("unknown connection id: {}", id))?;
+        let data = self.socket_data.get_mut(&id).ok_or(anyhow!("unknown connection id: {}", id))?;
         data.drain_waiter.push(tx);
         Ok(())
     }
@@ -389,7 +389,7 @@ impl<'a> TcpServer<'a> {
 
             loop {
                 match self.iface.poll(Instant::now()) {
-                    Ok(b) => break,
+                    Ok(_b) => break,
                     Err(Error::Exhausted) => {
                         log::debug!("smoltcp: exhausted.");
                         break;
@@ -448,11 +448,6 @@ impl<'a> TcpServer<'a> {
             }
             for connection_id in remove_conns.drain(..) {
                 let data = self.socket_data.remove(&connection_id).unwrap();
-                self.py_tx
-                    .send(py_events::Events::ConnectionClosed(ConnectionClosed {
-                        connection_id,
-                    }))
-                    .await?;
                 self.iface.remove_socket(data.handle);
             }
         }
@@ -466,7 +461,7 @@ impl<'a> fmt::Debug for TcpServer<'a> {
         f.debug_list()
             .entries(
                 self.iface.sockets()
-                    .filter_map(|(h, s)| match s {
+                    .filter_map(|(_h, s)| match s {
                         Socket::Tcp(s) => Some(s),
                         _ => None
                     })

@@ -3,11 +3,11 @@ mod tcp2;
 mod udp;
 mod wg2;
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
 
-use crate::udp::UdpServer;
+use std::sync::Arc;
+
+
+
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::sync::oneshot;
@@ -92,13 +92,13 @@ impl WireguardServer {
         let (udp_to_wg_tx, udp_to_wg_rx) = channel(16);
         let (wg_to_udp_tx, wg_to_udp_rx) = channel(16);
 
-        let (wg_to_smol_tx, mut wg_to_smol_rx) = channel(16);
+        let (wg_to_smol_tx, wg_to_smol_rx) = channel(16);
         let (smol_to_wg_tx, smol_to_wg_rx) = channel(16);
 
 
         let (smol_to_py_tx, mut smol_to_py_rx) = channel(64); // only used to notify of incoming connections and datagrams:
         // used to send data and to ask for packets. We need this to be unbounded as write() is not async.
-        let (py_to_smol_tx, mut py_to_smol_rx) = unbounded_channel();
+        let (py_to_smol_tx, py_to_smol_rx) = unbounded_channel();
 
         let mut udp_server = udp::UdpServer::new("0.0.0.0:51820", udp_to_wg_tx, wg_to_udp_rx).await?;
 
@@ -144,7 +144,7 @@ impl Drop for WireguardServer {
 }
 
 #[pyfunction]
-fn start_server(py: Python<'_>, host: String, port: u16, on_event: PyObject) -> PyResult<&PyAny> {
+fn start_server(py: Python<'_>, _host: String, _port: u16, on_event: PyObject) -> PyResult<&PyAny> {
     pyo3_asyncio::tokio::future_into_py(py, async move {
         // TODO: We need to split this into bind() and start().
         //  Otherwise there's a nasty race where on_event is called before start_server has been awaited.
@@ -157,7 +157,6 @@ fn start_server(py: Python<'_>, host: String, port: u16, on_event: PyObject) -> 
 fn mitmproxy_wireguard(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(start_server, m)?)?;
     m.add_class::<ConnectionEstablished>()?;
-    m.add_class::<ConnectionClosed>()?;
     m.add_class::<DatagramReceived>()?;
     Ok(())
 }

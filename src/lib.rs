@@ -15,37 +15,43 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, unbounded_channel};
 use tokio::task::JoinHandle;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Result, Context};
 use boringtun::crypto::{X25519PublicKey, X25519SecretKey};
 use py_events::*;
 
 
 #[pyclass]
 struct WireguardServer {
-    event_tx: mpsc::Sender<ConnectionCommand>,
+    event_tx: mpsc::UnboundedSender<ConnectionCommand>,
     python_callback_task: JoinHandle<()>,
 }
-
-async fn read(connection_id: ConnectionId, n: u32, event_tx: mpsc::Sender<ConnectionCommand>) -> Result<Vec<u8>> {
-    let (tx, rx) = oneshot::channel();
-    event_tx.send(ConnectionCommand::ReadData(connection_id, n, tx)).await?;
-    let data = rx.await?;
-    Ok(data)
-}
-
 
 #[pymethods]
 impl WireguardServer {
     fn tcp_read<'p>(&self, py: Python<'p>, connection_id: ConnectionId, n: u32) -> PyResult<&'p PyAny> {
-        let event_tx = self.event_tx.clone();
+        let (tx, rx) = oneshot::channel();
+        self.event_tx.send(ConnectionCommand::ReadData(connection_id, n, tx)).context("py -> smol event queue unavailable")?;
         pyo3_asyncio::tokio::future_into_py(py, async move {
-            let data = read(connection_id, n, event_tx).await?;
-            Ok(data)
+            let data = rx.await.context("failed to tcp_read()")?;
+            let bytes: Py<PyBytes> = Python::with_gil(|py| {
+                PyBytes::new(py, &data).into_py(py)
+            });
+            Ok(bytes)
         })
     }
 
-    fn tcp_send(&self, connection_id: ConnectionId, data: Vec<u8>) -> PyResult<()> {
-        todo!()
+    fn tcp_write(&self, connection_id: ConnectionId, data: Vec<u8>) -> PyResult<()> {
+        self.event_tx.send(ConnectionCommand::WriteData(connection_id, data)).context("py -> smol event queue unavailable")?;
+        Ok(())
+    }
+
+    fn tcp_drain<'p>(&self, py: Python<'p>, connection_id: ConnectionId) -> PyResult<&'p PyAny> {
+        let (tx, rx) = oneshot::channel();
+        self.event_tx.send(ConnectionCommand::DrainWriter(connection_id, tx)).context("py -> smol event queue unavailable")?;
+        pyo3_asyncio::tokio::future_into_py(py, async move {
+            rx.await.context("failed to tcp_drain()")?;
+            Ok(())
+        })
     }
 
     fn tcp_close(&self, connection_id: ConnectionId) -> PyResult<()> {
@@ -60,6 +66,15 @@ impl WireguardServer {
 
 impl WireguardServer {
     pub async fn new(on_event: PyObject) -> Result<WireguardServer> {
+
+        /*
+        env_logger::builder()
+            .filter_level(log::LevelFilter::Debug)
+            .init();
+
+        console_subscriber::init();
+        */
+
         let server_priv_key: X25519SecretKey = "c72d788fd0916b1185177fd7fa392451192773c889d17ac739571a63482c18bb"
             .parse()
             .map_err(|error: &str| anyhow!(error))?;
@@ -76,7 +91,8 @@ impl WireguardServer {
 
 
         let (smol_to_py_tx, mut smol_to_py_rx) = channel(64); // only used to notify of incoming connections and datagrams:
-        let (py_to_smol_tx, mut py_to_smol_rx) = channel(64); // used to send data and to ask for packets.
+        // used to send data and to ask for packets. We need this to be unbounded as write() is not async.
+        let (py_to_smol_tx, mut py_to_smol_rx) = unbounded_channel();
 
         let mut udp_server = udp::UdpServer::new("0.0.0.0:51820", udp_to_wg_tx, wg_to_udp_rx).await?;
 

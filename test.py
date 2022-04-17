@@ -12,8 +12,14 @@ async def main():
 
     async def handle_connection(connection_id: int):
         print("handle connection task")
-        data = await server.tcp_read(connection_id, 4096)
-        print(f"{bytes(data)=}")
+        while True:
+            data = await server.tcp_read(connection_id, 4096)
+            print(f"{len(data)=} {data[:10]=} ")
+            if not data:
+                return
+            server.tcp_write(connection_id, data.upper())
+            await server.tcp_drain(connection_id)
+            print("drained.")
 
     def on_event(event):
         # simple echo server
@@ -27,7 +33,7 @@ async def main():
     print("main")
     server = await mitmproxy_wireguard.start_server("", 51820, on_event)
     print(f"{server=}")
-    await asyncio.sleep(30)
+    await asyncio.sleep(3000)
     print("dropping")
     del server
     # no more messages

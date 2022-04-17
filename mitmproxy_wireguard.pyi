@@ -26,6 +26,13 @@ class Server:
     async def tcp_read(self, connection_id: int, n: int) -> bytes:
         pass
 
+    async def tcp_drain(self, connection_id: int) -> None:
+        pass
+
+    def tcp_write(self, connection_id: int, data: bytes) -> None:
+        pass
+
+
 async def start_server(
     host: str,
     port: int,

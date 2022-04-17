@@ -14,13 +14,13 @@ async def main():
         print("handle connection task")
 
         data = await server.tcp_read(connection_id, 4096)
-        print(f"{len(data)=} {data[:10]=} ")
-        if not data:
-            return
+        print(f"read complete. writing... {len(data)=} {data[:10]=} ")
         server.tcp_write(connection_id, data.upper())
+        print("write complete. draining...")
         await server.tcp_drain(connection_id)
-        print("drained.")
+        print("drained. closing...")
         server.tcp_close(connection_id)
+        print("closed.")
 
     def on_event(event):
         # simple echo server

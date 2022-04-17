@@ -1,13 +1,14 @@
+use std::{fmt, future};
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::{fmt, future};
+use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{anyhow, Context, Result};
 use smoltcp::{Error, time};
 use smoltcp::iface::{Interface, InterfaceBuilder, Routes, SocketHandle};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::{TcpSocket, TcpSocketBuffer, TcpState};
+use smoltcp::socket::{AnySocket, Socket, TcpSocket, TcpSocketBuffer, TcpState};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{IpAddress, IpCidr, IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Address, Ipv6Packet, TcpPacket};
 use tokio::sync::mpsc::{Permit, Receiver, Sender, UnboundedReceiver};
@@ -164,7 +165,6 @@ impl<'a> TxToken for VirtualTxToken<'a> {
         let mut buffer = vec![0; len];
         let result = f(&mut buffer);
         if result.is_ok() {
-
             self.0.send(NetworkCommand::SendPacket(
                 IpPacket::try_from(buffer).map_err(|_| smoltcp::Error::Malformed)?,
             ));
@@ -339,7 +339,6 @@ impl<'a> TcpServer<'a> {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-
         let mut remove_conns = Vec::new();
 
         loop {
@@ -349,6 +348,8 @@ impl<'a> TcpServer<'a> {
                 .iface
                 .poll_delay(Instant::now())
                 .unwrap_or_else(|| Duration::from_secs(10));
+
+            println!("Poll: {}", &delay);
 
             let sleep = tokio::time::sleep(delay.into());
             tokio::pin!(sleep);
@@ -402,7 +403,7 @@ impl<'a> TcpServer<'a> {
             for (connection_id, data) in self.socket_data.iter_mut() {
                 let sock = self.iface.get_socket::<TcpSocket>(data.handle);
                 if data.recv_waiter.is_some() {
-                    dbg!(sock.state(), sock.can_recv(), sock.may_recv());
+                    // dbg!(sock.state(), sock.can_recv(), sock.may_recv());
                     if sock.can_recv() {
                         let (n, tx) = data.recv_waiter.take().unwrap();
                         let bytes_available = sock.recv_queue();
@@ -416,7 +417,7 @@ impl<'a> TcpServer<'a> {
                             TcpState::CloseWait | TcpState::LastAck | TcpState::Closed | TcpState::Closing | TcpState::TimeWait => {
                                 let (_, tx) = data.recv_waiter.take().unwrap();
                                 tx.send(Vec::new()).map_err(|_| anyhow!("cannot send read() bytes"))?;
-                            },
+                            }
                             _ => {}
                         }
                     }
@@ -439,32 +440,41 @@ impl<'a> TcpServer<'a> {
                     // needs test: Is smoltcp smart enough to send out its own send buffer first?
                     sock.close();
                     data.write_eof = false;
-                    continue; // needs one more poll.
-                } else if sock.state() == TcpState::Closed {
-                    remove_conns.push(connection_id);
-
+                    continue; // we want one more poll() so that our FIN is sent.
+                }
+                if sock.state() == TcpState::Closed {
+                    remove_conns.push(*connection_id);
                 }
             }
             for connection_id in remove_conns.drain(..) {
-                let data = self.socket_data.remove(connection_id).unwrap();
+                let data = self.socket_data.remove(&connection_id).unwrap();
                 self.py_tx
-                        .send(py_events::Events::ConnectionClosed(ConnectionClosed {
-                            connection_id: *connection_id,
-                        }))
-                        .await?;
+                    .send(py_events::Events::ConnectionClosed(ConnectionClosed {
+                        connection_id,
+                    }))
+                    .await?;
                 self.iface.remove_socket(data.handle);
             }
-
         }
     }
 }
 
+
 impl<'a> fmt::Debug for TcpServer<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lst = f.debug_list().entry(&42).finish()?;
-        f.debug_struct("TcpServer")
-         .field("connections", &lst)
-         .finish()
+        f.write_str("TcpServer {")?;
+        f.debug_list()
+            .entries(
+                self.iface.sockets()
+                    .filter_map(|(h, s)| match s {
+                        Socket::Tcp(s) => Some(s),
+                        _ => None
+                    })
+                    .map(|sock| {
+                        format!("TCP {:<21} {:<21} {}", sock.remote_endpoint(), sock.local_endpoint(), sock.state())
+                    })
+            ).finish()?;
+        f.write_str("}")
     }
 }
 

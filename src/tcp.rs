@@ -4,16 +4,14 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{anyhow, Result};
+use smoltcp::Error;
 use smoltcp::iface::{Interface, InterfaceBuilder, Routes, SocketHandle};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{Socket, TcpSocket, TcpSocketBuffer, TcpState};
 use smoltcp::time::{Duration, Instant};
-use smoltcp::wire::{IpAddress, IpCidr, IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Packet, TcpPacket};
-use smoltcp::Error;
+use smoltcp::wire::{IpAddress, IpCidr, IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Packet, TcpPacket, UdpPacket};
 use tokio::sync::mpsc::{Permit, Receiver, Sender, UnboundedReceiver};
 use tokio::sync::oneshot;
-
-use crate::{py_events, ConnectionCommand, ConnectionId};
 
 /// generic IP packet type that wraps both IPv4 and IPv6 packet buffers
 #[derive(Debug)]
@@ -97,6 +95,36 @@ pub enum NetworkCommand {
 #[derive(Debug)]
 pub enum NetworkEvent {
     ReceivePacket(IpPacket),
+}
+
+pub type ConnectionId = u32;
+
+#[derive(Debug)]
+pub enum TransportEvent {
+    ConnectionEstablished {
+        connection_id: ConnectionId,
+        src_addr: SocketAddr,
+        dst_addr: SocketAddr,
+    },
+    DatagramReceived {
+        data: Vec<u8>,
+        src_addr: SocketAddr,
+        dst_addr: SocketAddr,
+    },
+}
+
+/// Commands that are sent by the Python side.
+#[derive(Debug)]
+pub enum TransportCommand {
+    ReadData(ConnectionId, u32, oneshot::Sender<Vec<u8>>),
+    WriteData(ConnectionId, Vec<u8>),
+    DrainWriter(ConnectionId, oneshot::Sender<()>),
+    CloseConnection(ConnectionId, bool),
+    SendDatagram {
+        data: Vec<u8>,
+        src_addr: SocketAddr,
+        dst_addr: SocketAddr,
+    },
 }
 
 pub struct VirtualDevice {
@@ -193,8 +221,8 @@ pub struct TcpServer<'a> {
     iface: Interface<'a, VirtualDevice>,
     net_tx: Sender<NetworkCommand>,
     net_rx: Receiver<NetworkEvent>,
-    py_tx: Sender<py_events::Events>,
-    py_rx: UnboundedReceiver<py_events::ConnectionCommand>,
+    py_tx: Sender<TransportEvent>,
+    py_rx: UnboundedReceiver<TransportCommand>,
 
     next_connection_id: ConnectionId,
     socket_data: HashMap<ConnectionId, SocketData>,
@@ -204,8 +232,8 @@ impl<'a> TcpServer<'a> {
     pub fn new(
         net_tx: Sender<NetworkCommand>,
         net_rx: Receiver<NetworkEvent>,
-        py_tx: Sender<py_events::Events>,
-        py_rx: UnboundedReceiver<py_events::ConnectionCommand>,
+        py_tx: Sender<TransportEvent>,
+        py_rx: UnboundedReceiver<TransportCommand>,
     ) -> Result<Self> {
         let device = VirtualDevice::new(net_tx.clone());
 
@@ -228,23 +256,43 @@ impl<'a> TcpServer<'a> {
         })
     }
 
-    pub async fn receive_packet(&mut self, mut packet: IpPacket) -> Result<()> {
-        if packet.transport_protocol() == IpProtocol::Udp {
-            /*
-            self.py_tx
-                .send(py_events::Events::DatagramReceived(DatagramReceived {
-                    src_addr: src_addr.into(),
-                    dst_addr: dst_addr.into(),
-                    data: packet.into_inner(), // FIXME: This should probably just be the payload.
-                }))
-                .await?;
-             */
-        }
 
-        if packet.transport_protocol() != IpProtocol::Tcp {
-            log::debug!("Unhandled protocol: {}", packet.transport_protocol());
-            return Ok(());
+    pub async fn receive_packet(&mut self, packet: IpPacket) -> Result<()> {
+        match packet.transport_protocol() {
+            IpProtocol::Tcp => self.receive_packet_tcp(packet).await,
+            IpProtocol::Udp => self.receive_packet_udp(packet).await,
+            _ => {
+                log::debug!("Unhandled protocol: {}", packet.transport_protocol());
+                return Ok(());
+            }
         }
+    }
+
+    pub async fn receive_packet_udp(&mut self, mut packet: IpPacket) -> Result<()> {
+        let src_ip = packet.src_ip();
+        let dst_ip = packet.dst_ip();
+
+        let mut udp_packet = match UdpPacket::new_checked(packet.transport_payload_mut()) {
+            Ok(p) => p,
+            Err(e) => {
+                log::debug!("Invalid UDP packet: {}", e);
+                return Ok(());
+            },
+        };
+        let src_addr = SocketAddr::new(src_ip, udp_packet.src_port());
+        let dst_addr = SocketAddr::new(dst_ip, udp_packet.dst_port());
+
+        let event = TransportEvent::DatagramReceived {
+                data: udp_packet.payload_mut().to_vec(),
+                src_addr,
+                dst_addr,
+            };
+
+        self.py_tx.send(event).await?;
+        Ok(())
+    }
+
+    pub async fn receive_packet_tcp(&mut self, mut packet: IpPacket) -> Result<()> {
 
         let src_ip = packet.src_ip();
         let dst_ip = packet.dst_ip();
@@ -286,13 +334,11 @@ impl<'a> TcpServer<'a> {
             self.socket_data.insert(connection_id, data);
 
             self.py_tx
-                .send(py_events::Events::ConnectionEstablished(
-                    py_events::ConnectionEstablished {
-                        connection_id,
-                        src_addr: src_addr.into(),
-                        dst_addr: dst_addr.into(),
-                    },
-                ))
+                .send(TransportEvent::ConnectionEstablished {
+                    connection_id,
+                    src_addr,
+                    dst_addr,
+                })
                 .await?;
         }
 
@@ -367,19 +413,19 @@ impl<'a> TcpServer<'a> {
                 },
                 Some(e) = self.py_rx.recv() => {
                     match e {
-                        ConnectionCommand::ReadData(id, n, tx) => {
+                        TransportCommand::ReadData(id, n, tx) => {
                             self.read_data(id,n,tx);
                         },
-                        ConnectionCommand::WriteData(id, buf) => {
+                        TransportCommand::WriteData(id, buf) => {
                             self.write_data(id, buf);
                         },
-                        ConnectionCommand::DrainWriter(id, tx) => {
+                        TransportCommand::DrainWriter(id, tx) => {
                             self.drain_writer(id, tx);
                         },
-                        ConnectionCommand::CloseConnection(id, half_close) => {
+                        TransportCommand::CloseConnection(id, half_close) => {
                             self.close_connection(id, half_close);
                         },
-                        ConnectionCommand::SendDatagram(_src_addr, _dst_addr, _buf) => {
+                        TransportCommand::SendDatagram{data: _, src_addr: _, dst_addr: _} => {
                             todo!();
                         },
                     }

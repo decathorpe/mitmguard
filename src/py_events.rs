@@ -3,9 +3,6 @@ use std::net::SocketAddr;
 
 use pyo3::prelude::*;
 use pyo3::{IntoPy, PyObject, Python};
-use tokio::sync::oneshot;
-
-pub type ConnectionId = u32;
 
 #[derive(Clone, Debug)]
 pub struct PySockAddr(pub SocketAddr);
@@ -37,26 +34,6 @@ impl IntoPy<PyObject> for PySockAddr {
     }
 }
 
-#[pyclass]
-#[derive(Debug)]
-pub struct ConnectionEstablished {
-    #[pyo3(get)]
-    pub connection_id: ConnectionId,
-    #[pyo3(get)]
-    pub src_addr: PySockAddr,
-    #[pyo3(get)]
-    pub dst_addr: PySockAddr,
-}
-
-#[pymethods]
-impl ConnectionEstablished {
-    fn __repr__(&self) -> String {
-        format!(
-            "ConnectionEstablished({}, {}, {})",
-            self.connection_id, self.src_addr, self.dst_addr
-        )
-    }
-}
 
 #[pyclass]
 #[derive(Debug)]
@@ -77,29 +54,4 @@ impl DatagramReceived {
             self.src_addr, self.dst_addr, self.data
         )
     }
-}
-
-#[derive(Debug)]
-pub enum Events {
-    ConnectionEstablished(ConnectionEstablished),
-    DatagramReceived(DatagramReceived),
-}
-
-impl IntoPy<PyObject> for Events {
-    fn into_py(self, py: Python<'_>) -> PyObject {
-        match self {
-            Events::ConnectionEstablished(e) => e.into_py(py),
-            Events::DatagramReceived(e) => e.into_py(py),
-        }
-    }
-}
-
-/// Commands that are sent by the Python side.
-#[derive(Debug)]
-pub enum ConnectionCommand {
-    ReadData(ConnectionId, u32, oneshot::Sender<Vec<u8>>),
-    WriteData(ConnectionId, Vec<u8>),
-    DrainWriter(ConnectionId, oneshot::Sender<()>),
-    CloseConnection(ConnectionId, bool),
-    SendDatagram(SocketAddr, SocketAddr, Vec<u8>),
 }

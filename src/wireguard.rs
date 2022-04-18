@@ -27,7 +27,7 @@ impl WireguardPeer {
 }
 
 pub struct WireguardServer {
-    socket: UdpSocket,
+    pub(crate) socket: UdpSocket,
     private_key: Arc<X25519SecretKey>,
     public_key: Arc<X25519PublicKey>,
     peers_by_idx: HashMap<u32, Arc<WireguardPeer>>,

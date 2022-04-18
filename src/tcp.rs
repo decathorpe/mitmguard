@@ -1,20 +1,19 @@
-use std::{fmt};
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{anyhow, Result};
-use smoltcp::{Error};
 use smoltcp::iface::{Interface, InterfaceBuilder, Routes, SocketHandle};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{Socket, TcpSocket, TcpSocketBuffer, TcpState};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{IpAddress, IpCidr, IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Packet, TcpPacket};
+use smoltcp::Error;
 use tokio::sync::mpsc::{Permit, Receiver, Sender, UnboundedReceiver};
-
 use tokio::sync::oneshot;
-use crate::{ConnectionCommand, ConnectionId, py_events};
 
+use crate::{py_events, ConnectionCommand, ConnectionId};
 
 /// generic IP packet type that wraps both IPv4 and IPv6 packet buffers
 #[derive(Debug)]
@@ -71,7 +70,7 @@ impl IpPacket {
             IpPacket::V6(packet) => {
                 log::debug!("TODO: Implement IPv6 next_header logic.");
                 packet.next_header()
-            }
+            },
         }
     }
 
@@ -90,7 +89,6 @@ impl IpPacket {
     }
 }
 
-
 #[derive(Debug)]
 pub enum NetworkCommand {
     SendPacket(IpPacket),
@@ -100,7 +98,6 @@ pub enum NetworkCommand {
 pub enum NetworkEvent {
     ReceivePacket(IpPacket),
 }
-
 
 pub struct VirtualDevice {
     rx_buffer: Vec<Vec<u8>>,
@@ -132,8 +129,8 @@ impl<'a> Device<'a> for VirtualDevice {
                     let tx = VirtualTxToken(permit);
                     return Some((rx, tx));
                 }
-            }
-            Err(_) => {}
+            },
+            Err(_) => {},
         }
         None
     }
@@ -153,13 +150,12 @@ impl<'a> Device<'a> for VirtualDevice {
     }
 }
 
-
 pub struct VirtualTxToken<'a>(Permit<'a, NetworkCommand>);
 
 impl<'a> TxToken for VirtualTxToken<'a> {
     fn consume<R, F>(self, _timestamp: Instant, len: usize, f: F) -> smoltcp::Result<R>
-        where
-            F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
+    where
+        F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
     {
         let mut buffer = vec![0; len];
         let result = f(&mut buffer);
@@ -178,8 +174,8 @@ pub struct VirtualRxToken {
 
 impl RxToken for VirtualRxToken {
     fn consume<R, F>(mut self, _timestamp: Instant, f: F) -> smoltcp::Result<R>
-        where
-            F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
+    where
+        F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
     {
         f(&mut self.buffer[..])
     }
@@ -221,7 +217,6 @@ impl<'a> TcpServer<'a> {
 
         let iface = builder.any_ip(true).ip_addrs(ip_addrs).routes(routes).finalize();
 
-
         Ok(Self {
             iface,
             net_tx,
@@ -259,7 +254,7 @@ impl<'a> TcpServer<'a> {
             Err(e) => {
                 log::debug!("Invalid TCP packet: {}", e);
                 return Ok(());
-            }
+            },
         };
 
         let src_addr = SocketAddr::new(src_ip, tcp_packet.src_port());
@@ -291,11 +286,13 @@ impl<'a> TcpServer<'a> {
             self.socket_data.insert(connection_id, data);
 
             self.py_tx
-                .send(py_events::Events::ConnectionEstablished(py_events::ConnectionEstablished {
-                    connection_id,
-                    src_addr: src_addr.into(),
-                    dst_addr: dst_addr.into(),
-                }))
+                .send(py_events::Events::ConnectionEstablished(
+                    py_events::ConnectionEstablished {
+                        connection_id,
+                        src_addr: src_addr.into(),
+                        dst_addr: dst_addr.into(),
+                    },
+                ))
                 .await?;
         }
 
@@ -308,18 +305,27 @@ impl<'a> TcpServer<'a> {
         if let Some(data) = self.socket_data.get_mut(&id) {
             assert!(data.recv_waiter.is_none());
             data.recv_waiter = Some((n, tx));
+        } else {
+            // connection is has already been removed because the connection is closed,
+            // so we just drop the tx.
         }
     }
 
     pub fn write_data(&mut self, id: ConnectionId, buf: Vec<u8>) {
         if let Some(data) = self.socket_data.get_mut(&id) {
             data.send_buffer.extend(buf);
+        } else {
+            // connection is has already been removed because the connection is closed,
+            // so we just ignore the write.
         }
     }
 
     pub fn drain_writer(&mut self, id: ConnectionId, tx: oneshot::Sender<()>) {
         if let Some(data) = self.socket_data.get_mut(&id) {
             data.drain_waiter.push(tx);
+        } else {
+            // connection is has already been removed because the connection is closed,
+            // so we just drop the tx.
         }
     }
 
@@ -331,6 +337,8 @@ impl<'a> TcpServer<'a> {
             } else {
                 sock.abort();
             }
+        } else {
+            // connection is already dead.
         }
     }
 
@@ -338,19 +346,18 @@ impl<'a> TcpServer<'a> {
         let mut remove_conns = Vec::new();
 
         loop {
-            let delay = self
-                .iface
-                .poll_delay(Instant::now())
-                .unwrap_or_else(|| Duration::from_secs(10));
+            // On a high level, we do three things in our main loop:
+            // 1. Wait for an event from either side and handle it, or wait until the next smoltcp timeout.
+            // 2. `.poll()` the smoltcp interface until it's finished with everything for now.
+            // 3. Check if we can wake up any waiters, move more data in the send buffer, or clean up sockets.
+
+            let delay = self.iface.poll_delay(Instant::now());
 
             log::debug!("{:?}", &self);
-            log::debug!("Poll: {}", &delay);
-
-            let sleep = tokio::time::sleep(delay.into());
-            tokio::pin!(sleep);
+            log::debug!("Poll: {:?}", &delay);
 
             tokio::select! {
-                _ = &mut sleep => {},
+                _ = async { tokio::time::sleep(delay.unwrap().into()).await }, if delay.is_some() => {},
                 Some(e) = self.net_rx.recv() => {
                     match e {
                         NetworkEvent::ReceivePacket(packet) => {
@@ -360,7 +367,7 @@ impl<'a> TcpServer<'a> {
                 },
                 Some(e) = self.py_rx.recv() => {
                     match e {
-                        ConnectionCommand::ReadData(id,n,tx) => {
+                        ConnectionCommand::ReadData(id, n, tx) => {
                             self.read_data(id,n,tx);
                         },
                         ConnectionCommand::WriteData(id, buf) => {
@@ -372,9 +379,9 @@ impl<'a> TcpServer<'a> {
                         ConnectionCommand::CloseConnection(id, half_close) => {
                             self.close_connection(id, half_close);
                         },
-                        _ => {
-                            todo!("Unimplemented: {:?}", e);
-                        }
+                        ConnectionCommand::SendDatagram(_src_addr, _dst_addr, _buf) => {
+                            todo!();
+                        },
                     }
                 },
                 Ok(()) = wait_for_channel_capacity(self.net_tx.clone()), if self.net_tx.capacity() == 0 => {
@@ -388,10 +395,12 @@ impl<'a> TcpServer<'a> {
                     Err(Error::Exhausted) => {
                         log::debug!("smoltcp: exhausted.");
                         break;
-                    }
+                    },
                     Err(e) => {
+                        // these can happen for "normal" reasons such as invalid packets,
+                        // we just write a log message and keep going.
                         log::debug!("smoltcp network error: {}", e)
-                    }
+                    },
                 }
             }
 
@@ -407,13 +416,18 @@ impl<'a> TcpServer<'a> {
                         buf.truncate(bytes_read);
                         tx.send(buf).map_err(|_| anyhow!("cannot send read() bytes"))?;
                     } else {
+                        // We can't use .may_recv() here as it returns false during establishment.
                         match sock.state() {
                             // can we still receive something in the future?
-                            TcpState::CloseWait | TcpState::LastAck | TcpState::Closed | TcpState::Closing | TcpState::TimeWait => {
+                            TcpState::CloseWait
+                            | TcpState::LastAck
+                            | TcpState::Closed
+                            | TcpState::Closing
+                            | TcpState::TimeWait => {
                                 let (_, tx) = data.recv_waiter.take().unwrap();
                                 tx.send(Vec::new()).map_err(|_| anyhow!("cannot send read() bytes"))?;
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                     }
                 }
@@ -449,21 +463,27 @@ impl<'a> TcpServer<'a> {
     }
 }
 
-
 impl<'a> fmt::Debug for TcpServer<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("TcpServer {")?;
         f.debug_list()
             .entries(
-                self.iface.sockets()
+                self.iface
+                    .sockets()
                     .filter_map(|(_h, s)| match s {
                         Socket::Tcp(s) => Some(s),
-                        _ => None
+                        _ => None,
                     })
                     .map(|sock| {
-                        format!("TCP {:<21} {:<21} {}", sock.remote_endpoint(), sock.local_endpoint(), sock.state())
-                    })
-            ).finish()?;
+                        format!(
+                            "TCP {:<21} {:<21} {}",
+                            sock.remote_endpoint(),
+                            sock.local_endpoint(),
+                            sock.state()
+                        )
+                    }),
+            )
+            .finish()?;
         f.write_str("}")
     }
 }

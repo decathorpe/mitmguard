@@ -14,7 +14,6 @@ use tokio::sync::RwLock;
 
 use crate::tcp::{IpPacket, NetworkCommand, NetworkEvent};
 
-
 pub struct WireguardPeer {
     tunnel: Box<Tunn>,
     endpoint: RwLock<Option<SocketAddr>>,
@@ -26,7 +25,6 @@ impl WireguardPeer {
         *endpoint = Some(addr);
     }
 }
-
 
 pub struct WireguardServer {
     socket: UdpSocket,
@@ -162,49 +160,55 @@ impl WireguardServer {
             TunnResult::Err(error) => {
                 log::error!("process_incoming_datagram: Err: {:?}", error);
             },
-            TunnResult::WriteToTunnelV4(buf, src_addr) => {
-                match Ipv4Packet::new_checked(buf.to_vec()) {
-                    Ok(packet) => {
-                        log::debug!("process_incoming_datagram: WriteToTunnelV4 {} -> {} (from {})", packet.src_addr(), packet.dst_addr(), src_addr);
-                        log::trace!("{} {}", src_addr, pretty_hex(&buf));
+            TunnResult::WriteToTunnelV4(buf, src_addr) => match Ipv4Packet::new_checked(buf.to_vec()) {
+                Ok(packet) => {
+                    log::debug!(
+                        "process_incoming_datagram: WriteToTunnelV4 {} -> {} (from {})",
+                        packet.src_addr(),
+                        packet.dst_addr(),
+                        src_addr
+                    );
+                    log::trace!("{} {}", src_addr, pretty_hex(&buf));
 
-                        self.peers_by_ip.insert(Ipv4Addr::from(packet.src_addr()).into(), peer);
-                        match self
-                            .net_tx
-                            .try_send(NetworkEvent::ReceivePacket(IpPacket::from(packet)))
-                        {
-                            Ok(()) => {},
-                            Err(_) => {
-                                log::warn!("Dropping incoming packet, TCP channel is full.")
-                            },
-                        };
-                    },
-                    Err(e) => {
-                        log::warn!("Invalid IPv4 packet: {}", e);
-                    },
-                }
+                    self.peers_by_ip.insert(Ipv4Addr::from(packet.src_addr()).into(), peer);
+                    match self
+                        .net_tx
+                        .try_send(NetworkEvent::ReceivePacket(IpPacket::from(packet)))
+                    {
+                        Ok(()) => {},
+                        Err(_) => {
+                            log::warn!("Dropping incoming packet, TCP channel is full.")
+                        },
+                    };
+                },
+                Err(e) => {
+                    log::warn!("Invalid IPv4 packet: {}", e);
+                },
             },
-            TunnResult::WriteToTunnelV6(buf, src_addr) => {
-                match Ipv6Packet::new_checked(buf.to_vec()) {
-                    Ok(packet) => {
-                        log::debug!("process_incoming_datagram: WriteToTunnelV6 {} -> {} (from {})", packet.src_addr(), packet.dst_addr(), src_addr);
-                        log::trace!("{} {}", src_addr, pretty_hex(&buf));
+            TunnResult::WriteToTunnelV6(buf, src_addr) => match Ipv6Packet::new_checked(buf.to_vec()) {
+                Ok(packet) => {
+                    log::debug!(
+                        "process_incoming_datagram: WriteToTunnelV6 {} -> {} (from {})",
+                        packet.src_addr(),
+                        packet.dst_addr(),
+                        src_addr
+                    );
+                    log::trace!("{} {}", src_addr, pretty_hex(&buf));
 
-                        self.peers_by_ip.insert(Ipv6Addr::from(packet.src_addr()).into(), peer);
-                        match self
-                            .net_tx
-                            .try_send(NetworkEvent::ReceivePacket(IpPacket::from(packet)))
-                        {
-                            Ok(()) => {},
-                            Err(_) => {
-                                log::warn!("Dropping incoming packet, TCP channel is full.")
-                            },
-                        };
-                    },
-                    Err(e) => {
-                        log::warn!("Invalid IPv6 packet: {}", e);
-                    },
-                }
+                    self.peers_by_ip.insert(Ipv6Addr::from(packet.src_addr()).into(), peer);
+                    match self
+                        .net_tx
+                        .try_send(NetworkEvent::ReceivePacket(IpPacket::from(packet)))
+                    {
+                        Ok(()) => {},
+                        Err(_) => {
+                            log::warn!("Dropping incoming packet, TCP channel is full.")
+                        },
+                    };
+                },
+                Err(e) => {
+                    log::warn!("Invalid IPv6 packet: {}", e);
+                },
             },
             TunnResult::WriteToNetwork(_) => unreachable!(),
         }
@@ -233,7 +237,12 @@ impl WireguardServer {
             },
             TunnResult::WriteToNetwork(buf) => {
                 let dst_addr = peer.endpoint.read().await.unwrap();
-                log::debug!("process_incoming_packet: WriteToNetwork {} -> {} (to {})", src_ip, dst_ip, dst_addr);
+                log::debug!(
+                    "process_incoming_packet: WriteToNetwork {} -> {} (to {})",
+                    src_ip,
+                    dst_ip,
+                    dst_addr
+                );
                 self.socket.send_to(buf, dst_addr).await?;
             },
             // IPv4 packet

@@ -1,7 +1,8 @@
-use pyo3::prelude::*;
-use pyo3::{IntoPy, PyObject, Python};
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
+
+use pyo3::prelude::*;
+use pyo3::{IntoPy, PyObject, Python};
 use tokio::sync::oneshot;
 
 pub type ConnectionId = u32;
@@ -57,7 +58,6 @@ impl ConnectionEstablished {
     }
 }
 
-
 #[pyclass]
 #[derive(Debug)]
 pub struct DatagramReceived {
@@ -78,7 +78,6 @@ impl DatagramReceived {
         )
     }
 }
-
 
 #[derive(Debug)]
 pub enum Events {

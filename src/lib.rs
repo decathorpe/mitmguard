@@ -1,6 +1,5 @@
 mod py_events;
 mod tcp;
-mod udp;
 mod wireguard;
 
 
@@ -86,10 +85,6 @@ impl WireguardServer {
             .parse()
             .map_err(|error: &str| anyhow!(error))?;
 
-
-        let (udp_to_wg_tx, udp_to_wg_rx) = channel(16);
-        let (wg_to_udp_tx, wg_to_udp_rx) = channel(16);
-
         let (wg_to_smol_tx, wg_to_smol_rx) = channel(16);
         let (smol_to_wg_tx, smol_to_wg_rx) = channel(16);
 
@@ -98,21 +93,17 @@ impl WireguardServer {
         // used to send data and to ask for packets. We need this to be unbounded as write() is not async.
         let (py_to_smol_tx, py_to_smol_rx) = unbounded_channel();
 
-        let mut udp_server = udp::UdpServer::new("0.0.0.0:51820", udp_to_wg_tx, wg_to_udp_rx).await?;
-
-        let mut wg_server = wireguard::WgServer::new(
+        let mut wg_server = wireguard::WireguardServer::new(
+            "0.0.0.0:51820",
             Arc::new(server_priv_key),
             vec![(Arc::new(peer_pub_key), None)],
-            wg_to_udp_tx,
-            udp_to_wg_rx,
             wg_to_smol_tx,
             smol_to_wg_rx,
-        )?;
+        ).await?;
 
         let mut tcp_server = tcp::TcpServer::new(smol_to_wg_tx, wg_to_smol_rx, smol_to_py_tx, py_to_smol_rx)?;
 
         // TODO: store handles and abort later.
-        tokio::spawn(async move { udp_server.run().await });
         tokio::spawn(async move { wg_server.run().await });
         tokio::spawn(async move { tcp_server.run().await });
 

@@ -8,11 +8,11 @@ use boringtun::noise::handshake::parse_handshake_anon;
 use boringtun::noise::{Packet, Tunn, TunnResult};
 use pretty_hex::pretty_hex;
 use smoltcp::wire::{Ipv4Packet, Ipv6Packet};
+use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::RwLock;
 
 use crate::tcp::{IpPacket, NetworkCommand, NetworkEvent};
-use crate::udp::{UdpCommand, UdpEvent};
 
 
 pub struct WireguardPeer {
@@ -28,31 +28,31 @@ impl WireguardPeer {
 }
 
 
-pub struct WgServer {
+pub struct WireguardServer {
+    socket: UdpSocket,
     private_key: Arc<X25519SecretKey>,
     public_key: Arc<X25519PublicKey>,
     peers_by_idx: HashMap<u32, Arc<WireguardPeer>>,
     peers_by_key: HashMap<Arc<X25519PublicKey>, Arc<WireguardPeer>>,
     peers_by_ip: HashMap<IpAddr, Arc<WireguardPeer>>,
-    udp_tx: Sender<UdpCommand>,
-    udp_rx: Receiver<UdpEvent>,
     net_tx: Sender<NetworkEvent>,
     net_rx: Receiver<NetworkCommand>,
     buf: [u8; 1500],
 }
 
-impl WgServer {
-    pub fn new(
+impl WireguardServer {
+    pub async fn new<A: ToSocketAddrs>(
+        addr: A,
         private_key: Arc<X25519SecretKey>,
         peers: Vec<(Arc<X25519PublicKey>, Option<[u8; 32]>)>,
-        udp_tx: Sender<UdpCommand>,
-        udp_rx: Receiver<UdpEvent>,
         net_tx: Sender<NetworkEvent>,
         net_rx: Receiver<NetworkCommand>,
     ) -> Result<Self> {
         if peers.is_empty() {
             return Err(anyhow!("No WireGuard peers."));
         }
+
+        let socket = UdpSocket::bind(addr).await?;
 
         let public_key = Arc::new(private_key.public_key());
 
@@ -75,13 +75,12 @@ impl WgServer {
         let buf = [0u8; 1500];
 
         Ok(Self {
+            socket,
             peers_by_idx,
             peers_by_key,
             peers_by_ip,
             private_key,
             public_key,
-            udp_tx,
-            udp_rx,
             net_tx,
             net_rx,
             buf,
@@ -89,14 +88,11 @@ impl WgServer {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        let mut buf = [0; 1500];
         loop {
             tokio::select! {
-                Some(e) = self.udp_rx.recv() => {
-                    match e {
-                        UdpEvent::ReceiveDatagram(data, src_addr) => {
-                            self.process_incoming_datagram(&data, src_addr).await?;
-                        }
-                    }
+                Ok((len, src_addr)) = self.socket.recv_from(&mut buf) => {
+                    self.process_incoming_datagram(&buf[..len], src_addr).await?;
                 },
                 Some(e) = self.net_rx.recv() => {
                     match e {
@@ -154,7 +150,7 @@ impl WgServer {
 
         while let TunnResult::WriteToNetwork(b) = result {
             log::debug!("process_incoming_datagram: WriteToNetwork");
-            self.udp_tx.send(UdpCommand::SendDatagram(b.to_vec(), src_addr)).await?;
+            self.socket.send_to(b, src_addr).await?;
             // check if there are more things to be handled
             result = peer.tunnel.decapsulate(None, &[0; 0], &mut self.buf);
         }
@@ -238,9 +234,7 @@ impl WgServer {
             TunnResult::WriteToNetwork(buf) => {
                 let dst_addr = peer.endpoint.read().await.unwrap();
                 log::debug!("process_incoming_packet: WriteToNetwork {} -> {} (to {})", src_ip, dst_ip, dst_addr);
-                self.udp_tx
-                    .send(UdpCommand::SendDatagram(buf.to_vec(), dst_addr))
-                    .await?;
+                self.socket.send_to(buf, dst_addr).await?;
             },
             // IPv4 packet
             TunnResult::WriteToTunnelV4(_, _) => {

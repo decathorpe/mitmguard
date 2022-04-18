@@ -4,13 +4,14 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{anyhow, Result};
-use smoltcp::Error;
 use smoltcp::iface::{Interface, InterfaceBuilder, Routes, SocketHandle};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{Socket, TcpSocket, TcpSocketBuffer, TcpState};
 use smoltcp::time::{Duration, Instant};
-use smoltcp::wire::{IpAddress, IpCidr, IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Packet, TcpPacket, UdpPacket};
+use smoltcp::wire::{IpAddress, IpCidr, IpProtocol, IpRepr, Ipv4Address, Ipv4Packet, Ipv4Repr, Ipv6Address, Ipv6Packet, Ipv6Repr, TcpPacket, UdpPacket, UdpRepr};
+use smoltcp::Error;
 use tokio::sync::mpsc::{Permit, Receiver, Sender, UnboundedReceiver};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::oneshot;
 
 /// generic IP packet type that wraps both IPv4 and IPv6 packet buffers
@@ -256,7 +257,6 @@ impl<'a> TcpServer<'a> {
         })
     }
 
-
     pub async fn receive_packet(&mut self, packet: IpPacket) -> Result<()> {
         match packet.transport_protocol() {
             IpProtocol::Tcp => self.receive_packet_tcp(packet).await,
@@ -264,7 +264,7 @@ impl<'a> TcpServer<'a> {
             _ => {
                 log::debug!("Unhandled protocol: {}", packet.transport_protocol());
                 return Ok(());
-            }
+            },
         }
     }
 
@@ -283,17 +283,16 @@ impl<'a> TcpServer<'a> {
         let dst_addr = SocketAddr::new(dst_ip, udp_packet.dst_port());
 
         let event = TransportEvent::DatagramReceived {
-                data: udp_packet.payload_mut().to_vec(),
-                src_addr,
-                dst_addr,
-            };
+            data: udp_packet.payload_mut().to_vec(),
+            src_addr,
+            dst_addr,
+        };
 
         self.py_tx.send(event).await?;
         Ok(())
     }
 
     pub async fn receive_packet_tcp(&mut self, mut packet: IpPacket) -> Result<()> {
-
         let src_ip = packet.src_ip();
         let dst_ip = packet.dst_ip();
 
@@ -388,6 +387,69 @@ impl<'a> TcpServer<'a> {
         }
     }
 
+    pub fn send_datagram(&mut self, data: Vec<u8>, src_addr: SocketAddr, dst_addr: SocketAddr) {
+        let permit = match self.net_tx.try_reserve() {
+            Ok(p) => p,
+            Err(_) => {
+                log::debug!("Channel full, discarding UDP packet.");
+                return;
+            }
+        };
+
+        let udp_repr = UdpRepr {
+            src_port: src_addr.port(),
+            dst_port: dst_addr.port(),
+        };
+
+        let ip_repr: IpRepr = match (src_addr, dst_addr) {
+            (SocketAddr::V4(src_addr), SocketAddr::V4(dst_addr)) => IpRepr::Ipv4(Ipv4Repr {
+                src_addr: Ipv4Address::from(*src_addr.ip()),
+                dst_addr: Ipv4Address::from(*dst_addr.ip()),
+                protocol: IpProtocol::Udp,
+                payload_len: udp_repr.header_len() + data.len(),
+                hop_limit: 255,
+            }),
+            (SocketAddr::V6(src_addr), SocketAddr::V6(dst_addr)) => IpRepr::Ipv6(Ipv6Repr {
+                src_addr: Ipv6Address::from(*src_addr.ip()),
+                dst_addr: Ipv6Address::from(*dst_addr.ip()),
+                next_header: IpProtocol::Udp,
+                payload_len: udp_repr.header_len() + data.len(),
+                hop_limit: 255,
+            }),
+            _ => {
+                log::error!("A datagram's src_addr and dst_addr must agree on IP version.");
+                return;
+            },
+        };
+
+        let buf = vec![0u8; ip_repr.total_len()];
+
+        let mut ip_packet = match ip_repr {
+            IpRepr::Ipv4(repr) => {
+                let mut packet = Ipv4Packet::new_unchecked(buf);
+                repr.emit(&mut packet, &ChecksumCapabilities::default());
+                IpPacket::from(packet)
+            },
+            IpRepr::Ipv6(repr) => {
+                let mut packet = Ipv6Packet::new_unchecked(buf);
+                repr.emit(&mut packet);
+                IpPacket::from(packet)
+            },
+            _ => unreachable!(),
+        };
+
+        udp_repr.emit(
+            &mut UdpPacket::new_unchecked(ip_packet.transport_payload_mut()),
+            &ip_repr.src_addr(),
+            &ip_repr.dst_addr(),
+            data.len(),
+            |buf| buf.copy_from_slice(data.as_slice()),
+            &ChecksumCapabilities::default(),
+        );
+
+        permit.send(NetworkCommand::SendPacket(ip_packet));
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         let mut remove_conns = Vec::new();
 
@@ -425,8 +487,8 @@ impl<'a> TcpServer<'a> {
                         TransportCommand::CloseConnection(id, half_close) => {
                             self.close_connection(id, half_close);
                         },
-                        TransportCommand::SendDatagram{data: _, src_addr: _, dst_addr: _} => {
-                            todo!();
+                        TransportCommand::SendDatagram{data, src_addr, dst_addr} => {
+                            self.send_datagram(data, src_addr, dst_addr);
                         },
                     }
                 },

@@ -1,3 +1,5 @@
+extern crate core;
+
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -14,10 +16,8 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::RecvError;
 use tokio::task::JoinHandle;
 
-use py_events::*;
 use tcp::{ConnectionId, TransportCommand, TransportEvent};
 
-mod py_events;
 mod tcp;
 mod wireguard;
 
@@ -84,6 +84,13 @@ impl TcpStream {
             _ => Err(PyKeyError::new_err(name)),
         }
     }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TcpStream({}, peer={}, sock={}, dst={})",
+            self.connection_id, self.peername, self.sockname, self.original_dst,
+        )
+    }
 }
 
 impl Drop for TcpStream {
@@ -127,7 +134,10 @@ fn connection_closed(_: RecvError) -> PyErr {
 #[pyclass]
 struct WireguardServer {
     event_tx: mpsc::UnboundedSender<TransportCommand>,
-    python_callback_task: JoinHandle<()>,
+    local_addr: SocketAddr,
+    python_notify_task: JoinHandle<()>,
+    wireguard_task: JoinHandle<Result<()>>,
+    tcp_task: JoinHandle<Result<()>>,
 }
 
 #[pymethods]
@@ -147,54 +157,56 @@ impl WireguardServer {
         self._stop();
         Ok(())
     }
+
+    fn __repr__(&self) -> String {
+        format!("WireguardServer({})", self.local_addr)
+    }
 }
 
 impl WireguardServer {
-    pub async fn new(handler: PyObject) -> Result<WireguardServer> {
-        let server_priv_key: X25519SecretKey = "c72d788fd0916b1185177fd7fa392451192773c889d17ac739571a63482c18bb"
-            .parse()
-            .map_err(|error: &str| anyhow!(error))?;
-        let peer_pub_key: X25519PublicKey = "DbwqnNYZWk5e19uuSR6WomO7VPaVbk/uKhmyFEnXdH8="
-            .parse()
-            .map_err(|error: &str| anyhow!(error))?;
+    pub async fn new(
+        host: String,
+        port: u16,
+        private_key: String,
+        peers: Vec<String>,
+        handle_connection: PyObject,
+        receive_datagram: PyObject,
+    ) -> Result<WireguardServer> {
+        let private_key: Arc<X25519SecretKey> = Arc::new(private_key.parse().map_err(|error: &str| anyhow!(error))?);
+        let peers = peers
+            .into_iter()
+            .map(|peer| {
+                let key = Arc::new(X25519PublicKey::from_str(&peer).map_err(|error: &str| anyhow!(error))?);
+                Ok((key, None))
+            })
+            .collect::<Result<Vec<(Arc<X25519PublicKey>, Option<[u8; 32]>)>>>()?;
+
+        let (py_loop, run_coroutine_threadsafe) = Python::with_gil(|py| -> PyResult<(PyObject, PyObject)> {
+            Ok((
+                pyo3_asyncio::tokio::get_current_loop(py)?.into(),
+                py.import("asyncio")?.getattr("run_coroutine_threadsafe")?.into(),
+            ))
+        })?;
 
         let (wg_to_smol_tx, wg_to_smol_rx) = channel(16);
         let (smol_to_wg_tx, smol_to_wg_rx) = channel(16);
 
-        let (smol_to_py_tx, mut smol_to_py_rx) = channel(64); // only used to notify of incoming connections and datagrams:
-                                                              // used to send data and to ask for packets. We need this to be unbounded as write() is not async.
-        let (py_to_smol_tx, py_to_smol_rx) = unbounded_channel();
+        let (smol_to_py_tx, mut smol_to_py_rx) = channel(64);  // only used to notify of incoming connections and datagrams
+        let (py_to_smol_tx, py_to_smol_rx) = unbounded_channel();  // used to send data and to ask for packets. We need this to be unbounded as write() is not async.
 
-        let mut wg_server = wireguard::WireguardServer::new(
-            "0.0.0.0:51820",
-            Arc::new(server_priv_key),
-            vec![(Arc::new(peer_pub_key), None)],
-            wg_to_smol_tx,
-            smol_to_wg_rx,
-        )
-        .await?;
-        let sockname = wg_server.socket.local_addr()?;
+        let mut wg_server =
+            wireguard::WireguardServer::new((host, port), private_key, peers, wg_to_smol_tx, smol_to_wg_rx).await?;
+        let local_addr = wg_server.socket.local_addr()?;
 
         let mut tcp_server = tcp::TcpServer::new(smol_to_wg_tx, wg_to_smol_rx, smol_to_py_tx, py_to_smol_rx)?;
 
         // TODO: store handles and abort later.
-        tokio::spawn(async move { wg_server.run().await });
-        tokio::spawn(async move { tcp_server.run().await });
+        let wireguard_task = tokio::spawn(async move { wg_server.run().await });
+        let tcp_task = tokio::spawn(async move { tcp_server.run().await });
 
-        // this task feeds events into the Python callback.
         let event_tx = py_to_smol_tx.clone();
-
-        let (py_loop, run_coroutine_threadsafe, handle_connection, receive_datagram) =
-            Python::with_gil(|py| -> PyResult<(PyObject, PyObject, PyObject, PyObject)> {
-                Ok((
-                    pyo3_asyncio::tokio::get_current_loop(py)?.into(),
-                    py.import("asyncio")?.getattr("run_coroutine_threadsafe")?.into(),
-                    handler.getattr(py, "handle_connection")?,
-                    handler.getattr(py, "receive_datagram")?,
-                ))
-            })?;
-
-        let python_callback_task = tokio::spawn(async move {
+        // this task feeds events into the Python callback.
+        let python_notify_task = tokio::spawn(async move {
             while let Some(event) = smol_to_py_rx.recv().await {
                 match event {
                     TransportEvent::ConnectionEstablished {
@@ -204,7 +216,7 @@ impl WireguardServer {
                     } => {
                         let stream = TcpStream {
                             connection_id,
-                            sockname,
+                            sockname: local_addr,
                             peername: src_addr,
                             original_dst: dst_addr,
                             event_tx: event_tx.clone(),
@@ -249,15 +261,20 @@ impl WireguardServer {
         });
 
         Ok(WireguardServer {
-            python_callback_task,
             event_tx: py_to_smol_tx,
+            local_addr,
+            python_notify_task,
+            wireguard_task,
+            tcp_task,
         })
     }
 
     fn _stop(&self) {
-        self.python_callback_task.abort();
-        // TODO: this is not trivial. we should close all connections somehow.
+        self.python_notify_task.abort();
+        self.wireguard_task.abort();
+        self.tcp_task.abort();
     }
+
 }
 
 impl Drop for WireguardServer {
@@ -267,11 +284,27 @@ impl Drop for WireguardServer {
 }
 
 #[pyfunction]
-fn start_server(py: Python<'_>, _host: String, _port: u16, handler: PyObject) -> PyResult<&PyAny> {
+fn start_server(
+    py: Python<'_>,
+    host: String,
+    port: u16,
+    private_key: String,
+    peers: Vec<String>,
+    handle_connection: PyObject,
+    receive_datagram: PyObject,
+) -> PyResult<&PyAny> {
     pyo3_asyncio::tokio::future_into_py(py, async move {
-        let server = WireguardServer::new(handler).await?;
+        // XXX: This is a bit of a race condition: the  handler could be called before
+        // .server = await start_server() has assigned to .server.
+        let server = WireguardServer::new(host, port, private_key, peers, handle_connection, receive_datagram).await?;
         Ok(server)
     })
+}
+
+#[pyfunction]
+fn keypair() -> (String, String) {
+    let key = X25519SecretKey::new();
+    (base64::encode(key.as_bytes()), base64::encode(key.public_key().as_bytes()))
 }
 
 #[pymodule]
@@ -280,8 +313,8 @@ fn mitmproxy_wireguard(_py: Python, m: &PyModule) -> PyResult<()> {
     console_subscriber::init();
 
     m.add_function(wrap_pyfunction!(start_server, m)?)?;
+    m.add_function(wrap_pyfunction!(keypair, m)?)?;
     m.add_class::<WireguardServer>()?;
     m.add_class::<TcpStream>()?;
-    m.add_class::<DatagramReceived>()?;
     Ok(())
 }

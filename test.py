@@ -5,10 +5,13 @@ import mitmproxy_wireguard
 print(f"{dir(mitmproxy_wireguard)=}")
 
 
-class Handler:
-    async def handle_connection(self, r: asyncio.StreamReader, w: asyncio.StreamWriter):
-        peername = w.get_extra_info('peername')
-        print(f"connection task {peername=}")
+async def main():
+
+    print(f"{mitmproxy_wireguard.keypair()=}")
+
+    async def handle_connection(r: asyncio.StreamReader, w: asyncio.StreamWriter):
+        print(f"connection task {w=}")
+        print(f"{w.get_extra_info('peername')=}")
         for _ in range(2):
             print("reading...")
             data = await r.read(4096)
@@ -21,30 +24,20 @@ class Handler:
         w.close()
         print("closed.")
 
-    def receive_datagram(self, *args):
-        print(f"{args=}")
-
-
-async def main():
-    server = None
-
-    loop = asyncio.get_running_loop()
-
-    h = Handler()
-
-    """
-    def on_event(event):
-        # simple echo server
-        print(f"{event=}")
-        if isinstance(event, mitmproxy_wireguard.ConnectionEstablished):
-            print(f"{event.src_addr=}")
-            loop.call_soon_threadsafe(lambda: loop.create_task(handle_connection(event.connection_id)))
-        elif isinstance(event, mitmproxy_wireguard.ConnectionClosed):
-            print(f"Connection closed {event.connection_id=}")
-    """
+    def receive_datagram(data, src_addr, dst_addr):
+        print(f"Echoing datagram... {data=} {src_addr=} {dst_addr=}")
+        server.send_datagram(data.upper(), dst_addr, src_addr)
+        print("done.")
 
     print("main")
-    server = await mitmproxy_wireguard.start_server("", 51820, h)
+    server = await mitmproxy_wireguard.start_server(
+        "0.0.0.0",
+        51820,
+        "c72d788fd0916b1185177fd7fa392451192773c889d17ac739571a63482c18bb",
+        ["DbwqnNYZWk5e19uuSR6WomO7VPaVbk/uKhmyFEnXdH8="],
+        handle_connection,
+        receive_datagram
+    )
     print(f"{server=}")
 
     await asyncio.sleep(3000)

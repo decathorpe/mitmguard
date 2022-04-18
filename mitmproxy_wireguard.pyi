@@ -1,36 +1,24 @@
-from collections.abc import Callable
+import asyncio
+from collections.abc import Awaitable, Callable
 
 
-class ConnectionEstablished:
-    connection_id: int
-    src_addr: tuple
-    dst_addr: tuple
+class WireguardServer:
+    def send_datagram(self, data: bytes, src_addr: tuple[str, int], dst_addr: tuple[str, int]) -> None:
+        ...
 
-
-
-class DatagramReceived:
-    src_addr: tuple
-    dst_addr: tuple
-    data: bytes
-
-
-class Server:
-    async def tcp_read(self, connection_id: int, n: int) -> bytes:
-        pass
-
-    async def tcp_drain(self, connection_id: int) -> None:
-        pass
-
-    def tcp_write(self, connection_id: int, data: bytes) -> None:
-        pass
-
-    def tcp_close(self, connection_id: int, half_close: bool = False) -> None:
-        pass
+    def stop(self) -> None:
+        ...
 
 
 async def start_server(
     host: str,
     port: int,
-    on_event: Callable[ConnectionEstablished | DatagramReceived]
-) -> Server:
+    private_key: str,
+    peers: list[str],
+    handle_connection: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
+    receive_datagram: Callable[[bytes, tuple[str, int], tuple[str, int]], None],
+) -> WireguardServer:
+    ...
+
+def keypair() -> tuple[str,str]:
     ...

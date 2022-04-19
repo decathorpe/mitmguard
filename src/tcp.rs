@@ -83,8 +83,7 @@ impl<'a> TcpServer<'a> {
 
             let delay = self.iface.poll_delay(Instant::now());
 
-            log::debug!("{:?}", &self);
-            log::debug!("Poll: {:?}", &delay);
+            log::debug!("{:?}: {}", &self, match delay { Some(d) => format!("poll in {}", d), _ => "idle".to_string() });
 
             tokio::select! {
                 _ = async { tokio::time::sleep(delay.unwrap().into()).await }, if delay.is_some() => {},

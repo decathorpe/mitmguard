@@ -159,6 +159,10 @@ impl WireguardServer {
         Ok(())
     }
 
+    fn getsockname(&self, py: Python) -> PyObject {
+        socketaddr_to_py(py, self.local_addr)
+    }
+
     fn __repr__(&self) -> String {
         format!("WireguardServer({})", self.local_addr)
     }
@@ -302,18 +306,26 @@ fn start_server(
 }
 
 #[pyfunction]
-fn keypair() -> (String, String) {
-    let key = X25519SecretKey::new();
-    (base64::encode(key.as_bytes()), base64::encode(key.public_key().as_bytes()))
+fn genkey() -> String {
+    base64::encode(X25519SecretKey::new().as_bytes())
+}
+
+#[pyfunction]
+fn pubkey(private_key: String) -> PyResult<String> {
+    let private_key = X25519SecretKey::from_str(&private_key)
+        .map_err(|_| PyValueError::new_err("Invalid private key."))?;
+    Ok(base64::encode(private_key.public_key().as_bytes()))
 }
 
 #[pymodule]
 fn mitmproxy_wireguard(_py: Python, m: &PyModule) -> PyResult<()> {
-    env_logger::builder().filter_level(log::LevelFilter::Debug).init();
+    env_logger::builder().init();
+    #[cfg(debug_assertions)]
     console_subscriber::init();
 
     m.add_function(wrap_pyfunction!(start_server, m)?)?;
-    m.add_function(wrap_pyfunction!(keypair, m)?)?;
+    m.add_function(wrap_pyfunction!(genkey, m)?)?;
+    m.add_function(wrap_pyfunction!(pubkey, m)?)?;
     m.add_class::<WireguardServer>()?;
     m.add_class::<TcpStream>()?;
     Ok(())

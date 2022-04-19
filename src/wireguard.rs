@@ -121,8 +121,8 @@ impl WireguardServer {
             Packet::HandshakeInit(p) => {
                 let hs = match parse_handshake_anon(&self.private_key, &self.public_key, &p) {
                     Ok(hs) => hs,
-                    Err(_) => {
-                        println!("Invalid packet 2.");
+                    Err(e) => {
+                        log::warn!("Cannot parse WireGuard packet ({:?}). You may have used invalid credentials.", e);
                         return None;
                     },
                 };

@@ -3,6 +3,9 @@ from collections.abc import Awaitable, Callable
 
 
 class WireguardServer:
+    def getsockname(self) -> tuple[str,int]:
+        ...
+
     def send_datagram(self, data: bytes, src_addr: tuple[str, int], dst_addr: tuple[str, int]) -> None:
         ...
 
@@ -20,5 +23,8 @@ async def start_server(
 ) -> WireguardServer:
     ...
 
-def keypair() -> tuple[str,str]:
+def genkey() -> str:
+    ...
+
+def pubkey(private_key: str) -> str:
     ...

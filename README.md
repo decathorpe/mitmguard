@@ -6,7 +6,7 @@ Transparently proxy any device that can be configured as a WireGuard client!
 
 ## Architecture
 
-![library architecture](architecture.svg)
+![library architecture](architecture.png)
 
 ## DONE
 

@@ -14,7 +14,7 @@ async def start_server(
     host: str,
     port: int,
     private_key: str,
-    peers: list[str],
+    peer_public_keys: list[str],
     handle_connection: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
     receive_datagram: Callable[[bytes, tuple[str, int], tuple[str, int]], None],
 ) -> WireguardServer:

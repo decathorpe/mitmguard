@@ -14,14 +14,27 @@ async def main():
         print(f"{w.get_extra_info('peername')=}")
         for _ in range(2):
             print("reading...")
-            data = await r.read(4096)
+            try:
+                data = await r.read(4096)
+            except Exception as exc:
+                print(f"read {exc=}")
+                data = b""
             print(f"read complete. writing... {len(data)=} {data[:10]=} ")
-            w.write(data.upper())
+            try:
+                w.write(data.upper())
+            except Exception as exc:
+                print(f"write {exc=}")
             print("write complete. draining...")
-            await w.drain()
+            try:
+                await w.drain()
+            except Exception as exc:
+                print(f"drain {exc=}")
             print("drained.")
         print("closing...")
-        w.close()
+        try:
+            w.close()
+        except Exception as exc:
+            print(f"close {exc=}")
         print("closed.")
 
     def receive_datagram(data, src_addr, dst_addr):
@@ -40,11 +53,12 @@ async def main():
     )
     print(f"{server=}")
 
-    await asyncio.sleep(3000)
-    print("dropping")
-    del server
+    await asyncio.sleep(20)
+    print("stopping")
+    server.stop()
+    # del server
     # no more messages
-    await asyncio.sleep(3)
+    await asyncio.sleep(3000)
 
 
 if __name__ == "__main__":

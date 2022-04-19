@@ -15,11 +15,12 @@ use tokio::sync::mpsc::{channel, unbounded_channel};
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::RecvError;
 use tokio::task::JoinHandle;
-
-use tcp::{ConnectionId, TransportCommand, TransportEvent};
+use crate::messages::{ConnectionId, TransportCommand, TransportEvent};
 
 mod tcp;
 mod wireguard;
+mod messages;
+mod virtual_device;
 
 #[pyclass]
 struct TcpStream {
@@ -124,7 +125,7 @@ fn py_to_socketaddr(t: &PyTuple) -> PyResult<SocketAddr> {
 }
 
 fn event_queue_unavailable(_: SendError<TransportCommand>) -> PyErr {
-    PyOSError::new_err("py -> smol event queue unavailable")
+    PyOSError::new_err("WireGuard server has been shut down.")
 }
 
 fn connection_closed(_: RecvError) -> PyErr {
@@ -168,12 +169,12 @@ impl WireguardServer {
         host: String,
         port: u16,
         private_key: String,
-        peers: Vec<String>,
+        peer_public_keys: Vec<String>,
         handle_connection: PyObject,
         receive_datagram: PyObject,
     ) -> Result<WireguardServer> {
         let private_key: Arc<X25519SecretKey> = Arc::new(private_key.parse().map_err(|error: &str| anyhow!(error))?);
-        let peers = peers
+        let peers = peer_public_keys
             .into_iter()
             .map(|peer| {
                 let key = Arc::new(X25519PublicKey::from_str(&peer).map_err(|error: &str| anyhow!(error))?);
@@ -196,11 +197,10 @@ impl WireguardServer {
 
         let mut wg_server =
             wireguard::WireguardServer::new((host, port), private_key, peers, wg_to_smol_tx, smol_to_wg_rx).await?;
-        let local_addr = wg_server.socket.local_addr()?;
+        let local_addr = wg_server.local_addr()?;
 
         let mut tcp_server = tcp::TcpServer::new(smol_to_wg_tx, wg_to_smol_rx, smol_to_py_tx, py_to_smol_rx)?;
 
-        // TODO: store handles and abort later.
         let wireguard_task = tokio::spawn(async move { wg_server.run().await });
         let tcp_task = tokio::spawn(async move { tcp_server.run().await });
 
@@ -289,14 +289,14 @@ fn start_server(
     host: String,
     port: u16,
     private_key: String,
-    peers: Vec<String>,
+    peer_public_keys: Vec<String>,
     handle_connection: PyObject,
     receive_datagram: PyObject,
 ) -> PyResult<&PyAny> {
     pyo3_asyncio::tokio::future_into_py(py, async move {
         // XXX: This is a bit of a race condition: the  handler could be called before
         // .server = await start_server() has assigned to .server.
-        let server = WireguardServer::new(host, port, private_key, peers, handle_connection, receive_datagram).await?;
+        let server = WireguardServer::new(host, port, private_key, peer_public_keys, handle_connection, receive_datagram).await?;
         Ok(server)
     })
 }

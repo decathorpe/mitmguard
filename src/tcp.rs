@@ -1,220 +1,35 @@
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 
 use anyhow::{anyhow, Result};
 use smoltcp::iface::{Interface, InterfaceBuilder, Routes, SocketHandle};
-use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::socket::{Socket, TcpSocket, TcpSocketBuffer, TcpState};
 use smoltcp::time::{Duration, Instant};
-use smoltcp::wire::{IpAddress, IpCidr, IpProtocol, IpRepr, Ipv4Address, Ipv4Packet, Ipv4Repr, Ipv6Address, Ipv6Packet, Ipv6Repr, TcpPacket, UdpPacket, UdpRepr};
+use smoltcp::wire::{
+    IpAddress, IpCidr, IpProtocol, IpRepr, Ipv4Address, Ipv4Packet, Ipv4Repr, Ipv6Address, Ipv6Packet, Ipv6Repr,
+    TcpPacket, UdpPacket, UdpRepr,
+};
 use smoltcp::Error;
-use tokio::sync::mpsc::{Permit, Receiver, Sender, UnboundedReceiver};
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver};
 use tokio::sync::oneshot;
 
-/// generic IP packet type that wraps both IPv4 and IPv6 packet buffers
-#[derive(Debug)]
-pub enum IpPacket {
-    V4(Ipv4Packet<Vec<u8>>),
-    V6(Ipv6Packet<Vec<u8>>),
-}
+use crate::messages::{ConnectionId, IpPacket, NetworkCommand, NetworkEvent, TransportCommand, TransportEvent};
+use crate::virtual_device::VirtualDevice;
 
-impl From<Ipv4Packet<Vec<u8>>> for IpPacket {
-    fn from(packet: Ipv4Packet<Vec<u8>>) -> Self {
-        IpPacket::V4(packet)
-    }
-}
-
-impl From<Ipv6Packet<Vec<u8>>> for IpPacket {
-    fn from(packet: Ipv6Packet<Vec<u8>>) -> Self {
-        IpPacket::V6(packet)
-    }
-}
-
-impl TryFrom<Vec<u8>> for IpPacket {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Vec<u8>) -> std::result::Result<Self, Self::Error> {
-        if value.is_empty() {
-            return Err(anyhow!("Empty packet."));
-        }
-        match value[0] >> 4 {
-            4 => Ok(IpPacket::V4(Ipv4Packet::new_checked(value)?)),
-            6 => Ok(IpPacket::V6(Ipv6Packet::new_checked(value)?)),
-            _ => Err(anyhow!("Not an IP packet: {:?}", value)),
-        }
-    }
-}
-
-impl IpPacket {
-    pub fn src_ip(&self) -> IpAddr {
-        match self {
-            IpPacket::V4(packet) => IpAddr::V4(Ipv4Addr::from(packet.src_addr())),
-            IpPacket::V6(packet) => IpAddr::V6(Ipv6Addr::from(packet.src_addr())),
-        }
-    }
-
-    pub fn dst_ip(&self) -> IpAddr {
-        match self {
-            IpPacket::V4(packet) => IpAddr::V4(Ipv4Addr::from(packet.dst_addr())),
-            IpPacket::V6(packet) => IpAddr::V6(Ipv6Addr::from(packet.dst_addr())),
-        }
-    }
-
-    pub fn transport_protocol(&self) -> IpProtocol {
-        match self {
-            IpPacket::V4(packet) => packet.protocol(),
-            IpPacket::V6(packet) => {
-                log::debug!("TODO: Implement IPv6 next_header logic.");
-                packet.next_header()
-            },
-        }
-    }
-
-    pub fn transport_payload_mut(&mut self) -> &mut [u8] {
-        match self {
-            IpPacket::V4(packet) => packet.payload_mut(),
-            IpPacket::V6(packet) => packet.payload_mut(),
-        }
-    }
-
-    pub fn into_inner(self) -> Vec<u8> {
-        match self {
-            IpPacket::V4(packet) => packet.into_inner(),
-            IpPacket::V6(packet) => packet.into_inner(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum NetworkCommand {
-    SendPacket(IpPacket),
-}
-
-#[derive(Debug)]
-pub enum NetworkEvent {
-    ReceivePacket(IpPacket),
-}
-
-pub type ConnectionId = u32;
-
-#[derive(Debug)]
-pub enum TransportEvent {
-    ConnectionEstablished {
-        connection_id: ConnectionId,
-        src_addr: SocketAddr,
-        dst_addr: SocketAddr,
-    },
-    DatagramReceived {
-        data: Vec<u8>,
-        src_addr: SocketAddr,
-        dst_addr: SocketAddr,
-    },
-}
-
-/// Commands that are sent by the Python side.
-#[derive(Debug)]
-pub enum TransportCommand {
-    ReadData(ConnectionId, u32, oneshot::Sender<Vec<u8>>),
-    WriteData(ConnectionId, Vec<u8>),
-    DrainWriter(ConnectionId, oneshot::Sender<()>),
-    CloseConnection(ConnectionId, bool),
-    SendDatagram {
-        data: Vec<u8>,
-        src_addr: SocketAddr,
-        dst_addr: SocketAddr,
-    },
-}
-
-pub struct VirtualDevice {
-    rx_buffer: Vec<Vec<u8>>,
-    tx_channel: Sender<NetworkCommand>,
-}
-
-impl VirtualDevice {
-    pub fn new(tx_channel: Sender<NetworkCommand>) -> Self {
-        VirtualDevice {
-            rx_buffer: vec![],
-            tx_channel,
-        }
-    }
-
-    pub fn receive_packet(self: &mut Self, packet: IpPacket) {
-        self.rx_buffer.push(packet.into_inner());
-    }
-}
-
-impl<'a> Device<'a> for VirtualDevice {
-    type RxToken = VirtualRxToken;
-    type TxToken = VirtualTxToken<'a>;
-
-    fn receive(&'a mut self) -> Option<(Self::RxToken, Self::TxToken)> {
-        match self.tx_channel.try_reserve() {
-            Ok(permit) => {
-                if let Some(buffer) = self.rx_buffer.pop() {
-                    let rx = Self::RxToken { buffer };
-                    let tx = VirtualTxToken(permit);
-                    return Some((rx, tx));
-                }
-            },
-            Err(_) => {},
-        }
-        None
-    }
-
-    fn transmit(&'a mut self) -> Option<Self::TxToken> {
-        match self.tx_channel.try_reserve() {
-            Ok(permit) => Some(VirtualTxToken(permit)),
-            Err(_) => None,
-        }
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut capabilities = DeviceCapabilities::default();
-        capabilities.medium = Medium::Ip;
-        capabilities.max_transmission_unit = 1500;
-        capabilities
-    }
-}
-
-pub struct VirtualTxToken<'a>(Permit<'a, NetworkCommand>);
-
-impl<'a> TxToken for VirtualTxToken<'a> {
-    fn consume<R, F>(self, _timestamp: Instant, len: usize, f: F) -> smoltcp::Result<R>
-    where
-        F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
-    {
-        let mut buffer = vec![0; len];
-        let result = f(&mut buffer);
-        if result.is_ok() {
-            self.0.send(NetworkCommand::SendPacket(
-                IpPacket::try_from(buffer).map_err(|_| smoltcp::Error::Malformed)?,
-            ));
-        }
-        result
-    }
-}
-
-pub struct VirtualRxToken {
-    buffer: Vec<u8>,
-}
-
-impl RxToken for VirtualRxToken {
-    fn consume<R, F>(mut self, _timestamp: Instant, f: F) -> smoltcp::Result<R>
-    where
-        F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
-    {
-        f(&mut self.buffer[..])
-    }
-}
-
+/// Associated data for a smoltcp socket.
 struct SocketData {
     handle: SocketHandle,
+    /// smoltcp can only operate with fixed-size buffers, but Python's stream implementation assumes
+    /// an infinite buffer. So we have a second send buffer here, plus a boolean to indicate that
+    /// we want to send a FIN.
     send_buffer: VecDeque<u8>,
     write_eof: bool,
+    // Gets notified once there's data to be read.
     recv_waiter: Option<(u32, oneshot::Sender<Vec<u8>>)>,
+    // Gets notified once there is enough space in the write buffer.
     drain_waiter: Vec<oneshot::Sender<()>>,
 }
 
@@ -255,199 +70,6 @@ impl<'a> TcpServer<'a> {
             next_connection_id: 0,
             socket_data: HashMap::new(),
         })
-    }
-
-    pub async fn receive_packet(&mut self, packet: IpPacket) -> Result<()> {
-        match packet.transport_protocol() {
-            IpProtocol::Tcp => self.receive_packet_tcp(packet).await,
-            IpProtocol::Udp => self.receive_packet_udp(packet).await,
-            _ => {
-                log::debug!("Unhandled protocol: {}", packet.transport_protocol());
-                return Ok(());
-            },
-        }
-    }
-
-    pub async fn receive_packet_udp(&mut self, mut packet: IpPacket) -> Result<()> {
-        let src_ip = packet.src_ip();
-        let dst_ip = packet.dst_ip();
-
-        let mut udp_packet = match UdpPacket::new_checked(packet.transport_payload_mut()) {
-            Ok(p) => p,
-            Err(e) => {
-                log::debug!("Invalid UDP packet: {}", e);
-                return Ok(());
-            },
-        };
-        let src_addr = SocketAddr::new(src_ip, udp_packet.src_port());
-        let dst_addr = SocketAddr::new(dst_ip, udp_packet.dst_port());
-
-        let event = TransportEvent::DatagramReceived {
-            data: udp_packet.payload_mut().to_vec(),
-            src_addr,
-            dst_addr,
-        };
-
-        self.py_tx.send(event).await?;
-        Ok(())
-    }
-
-    pub async fn receive_packet_tcp(&mut self, mut packet: IpPacket) -> Result<()> {
-        let src_ip = packet.src_ip();
-        let dst_ip = packet.dst_ip();
-
-        let tcp_packet = match TcpPacket::new_checked(packet.transport_payload_mut()) {
-            Ok(p) => p,
-            Err(e) => {
-                log::debug!("Invalid TCP packet: {}", e);
-                return Ok(());
-            },
-        };
-
-        let src_addr = SocketAddr::new(src_ip, tcp_packet.src_port());
-        let dst_addr = SocketAddr::new(dst_ip, tcp_packet.dst_port());
-
-        let syn = tcp_packet.syn();
-        let _fin = tcp_packet.fin();
-
-        if syn {
-            let mut socket = TcpSocket::new(
-                TcpSocketBuffer::new(vec![0u8; 64 * 1024]),
-                TcpSocketBuffer::new(vec![0u8; 64 * 1024]),
-            );
-            socket.listen(dst_addr)?;
-            socket.set_timeout(Some(Duration::from_secs(60)));
-            socket.set_keep_alive(Some(Duration::from_secs(28)));
-            let handle = self.iface.add_socket(socket);
-
-            let connection_id = self.next_connection_id;
-            self.next_connection_id += 1;
-
-            let data = SocketData {
-                handle,
-                send_buffer: VecDeque::new(),
-                write_eof: false,
-                recv_waiter: None,
-                drain_waiter: Vec::new(),
-            };
-            self.socket_data.insert(connection_id, data);
-
-            self.py_tx
-                .send(TransportEvent::ConnectionEstablished {
-                    connection_id,
-                    src_addr,
-                    dst_addr,
-                })
-                .await?;
-        }
-
-        self.iface.device_mut().receive_packet(packet);
-
-        Ok(())
-    }
-
-    pub fn read_data(&mut self, id: ConnectionId, n: u32, tx: oneshot::Sender<Vec<u8>>) {
-        if let Some(data) = self.socket_data.get_mut(&id) {
-            assert!(data.recv_waiter.is_none());
-            data.recv_waiter = Some((n, tx));
-        } else {
-            // connection is has already been removed because the connection is closed,
-            // so we just drop the tx.
-        }
-    }
-
-    pub fn write_data(&mut self, id: ConnectionId, buf: Vec<u8>) {
-        if let Some(data) = self.socket_data.get_mut(&id) {
-            data.send_buffer.extend(buf);
-        } else {
-            // connection is has already been removed because the connection is closed,
-            // so we just ignore the write.
-        }
-    }
-
-    pub fn drain_writer(&mut self, id: ConnectionId, tx: oneshot::Sender<()>) {
-        if let Some(data) = self.socket_data.get_mut(&id) {
-            data.drain_waiter.push(tx);
-        } else {
-            // connection is has already been removed because the connection is closed,
-            // so we just drop the tx.
-        }
-    }
-
-    pub fn close_connection(&mut self, id: ConnectionId, half_close: bool) {
-        if let Some(data) = self.socket_data.get_mut(&id) {
-            let sock = self.iface.get_socket::<TcpSocket>(data.handle);
-            if half_close {
-                data.write_eof = true;
-            } else {
-                sock.abort();
-            }
-        } else {
-            // connection is already dead.
-        }
-    }
-
-    pub fn send_datagram(&mut self, data: Vec<u8>, src_addr: SocketAddr, dst_addr: SocketAddr) {
-        let permit = match self.net_tx.try_reserve() {
-            Ok(p) => p,
-            Err(_) => {
-                log::debug!("Channel full, discarding UDP packet.");
-                return;
-            }
-        };
-
-        let udp_repr = UdpRepr {
-            src_port: src_addr.port(),
-            dst_port: dst_addr.port(),
-        };
-
-        let ip_repr: IpRepr = match (src_addr, dst_addr) {
-            (SocketAddr::V4(src_addr), SocketAddr::V4(dst_addr)) => IpRepr::Ipv4(Ipv4Repr {
-                src_addr: Ipv4Address::from(*src_addr.ip()),
-                dst_addr: Ipv4Address::from(*dst_addr.ip()),
-                protocol: IpProtocol::Udp,
-                payload_len: udp_repr.header_len() + data.len(),
-                hop_limit: 255,
-            }),
-            (SocketAddr::V6(src_addr), SocketAddr::V6(dst_addr)) => IpRepr::Ipv6(Ipv6Repr {
-                src_addr: Ipv6Address::from(*src_addr.ip()),
-                dst_addr: Ipv6Address::from(*dst_addr.ip()),
-                next_header: IpProtocol::Udp,
-                payload_len: udp_repr.header_len() + data.len(),
-                hop_limit: 255,
-            }),
-            _ => {
-                log::error!("A datagram's src_addr and dst_addr must agree on IP version.");
-                return;
-            },
-        };
-
-        let buf = vec![0u8; ip_repr.total_len()];
-
-        let mut ip_packet = match ip_repr {
-            IpRepr::Ipv4(repr) => {
-                let mut packet = Ipv4Packet::new_unchecked(buf);
-                repr.emit(&mut packet, &ChecksumCapabilities::default());
-                IpPacket::from(packet)
-            },
-            IpRepr::Ipv6(repr) => {
-                let mut packet = Ipv6Packet::new_unchecked(buf);
-                repr.emit(&mut packet);
-                IpPacket::from(packet)
-            },
-            _ => unreachable!(),
-        };
-
-        udp_repr.emit(
-            &mut UdpPacket::new_unchecked(ip_packet.transport_payload_mut()),
-            &ip_repr.src_addr(),
-            &ip_repr.dst_addr(),
-            data.len(),
-            |buf| buf.copy_from_slice(data.as_slice()),
-            &ChecksumCapabilities::default(),
-        );
-
-        permit.send(NetworkCommand::SendPacket(ip_packet));
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -547,6 +169,7 @@ impl<'a> TcpServer<'a> {
                     }
                 }
                 if !data.drain_waiter.is_empty() {
+                    // TODO: benchmark different variants here. (e.g. only return on half capacity)
                     if sock.send_queue() < sock.send_capacity() {
                         for waiter in data.drain_waiter.drain(..) {
                             waiter.send(()).map_err(|_| anyhow!("cannot notify drain writer"))?;
@@ -557,7 +180,7 @@ impl<'a> TcpServer<'a> {
                     // needs test: Is smoltcp smart enough to send out its own send buffer first?
                     sock.close();
                     data.write_eof = false;
-                    continue; // we want one more poll() so that our FIN is sent.
+                    continue; // we want one more poll() so that our FIN is sent (TODO: test that).
                 }
                 if sock.state() == TcpState::Closed {
                     remove_conns.push(*connection_id);
@@ -568,6 +191,202 @@ impl<'a> TcpServer<'a> {
                 self.iface.remove_socket(data.handle);
             }
         }
+    }
+
+    async fn receive_packet(&mut self, packet: IpPacket) -> Result<()> {
+        match packet.transport_protocol() {
+            IpProtocol::Tcp => self.receive_packet_tcp(packet).await,
+            IpProtocol::Udp => self.receive_packet_udp(packet).await,
+            _ => {
+                log::debug!("Unhandled protocol: {}", packet.transport_protocol());
+                return Ok(());
+            },
+        }
+    }
+
+    async fn receive_packet_udp(&mut self, mut packet: IpPacket) -> Result<()> {
+        let src_ip = packet.src_ip();
+        let dst_ip = packet.dst_ip();
+
+        let mut udp_packet = match UdpPacket::new_checked(packet.payload_mut()) {
+            Ok(p) => p,
+            Err(e) => {
+                log::debug!("Invalid UDP packet: {}", e);
+                return Ok(());
+            },
+        };
+        let src_addr = SocketAddr::new(src_ip, udp_packet.src_port());
+        let dst_addr = SocketAddr::new(dst_ip, udp_packet.dst_port());
+
+        let event = TransportEvent::DatagramReceived {
+            data: udp_packet.payload_mut().to_vec(),
+            src_addr,
+            dst_addr,
+        };
+
+        self.py_tx.send(event).await?;
+        Ok(())
+    }
+
+    async fn receive_packet_tcp(&mut self, mut packet: IpPacket) -> Result<()> {
+        let src_ip = packet.src_ip();
+        let dst_ip = packet.dst_ip();
+
+        let tcp_packet = match TcpPacket::new_checked(packet.payload_mut()) {
+            Ok(p) => p,
+            Err(e) => {
+                log::debug!("Invalid TCP packet: {}", e);
+                return Ok(());
+            },
+        };
+
+        let src_addr = SocketAddr::new(src_ip, tcp_packet.src_port());
+        let dst_addr = SocketAddr::new(dst_ip, tcp_packet.dst_port());
+
+        let syn = tcp_packet.syn();
+        let _fin = tcp_packet.fin();
+
+        if syn {
+            let mut socket = TcpSocket::new(
+                TcpSocketBuffer::new(vec![0u8; 64 * 1024]),
+                TcpSocketBuffer::new(vec![0u8; 64 * 1024]),
+            );
+            socket.listen(dst_addr)?;
+            socket.set_timeout(Some(Duration::from_secs(60)));
+            socket.set_keep_alive(Some(Duration::from_secs(28)));
+            let handle = self.iface.add_socket(socket);
+
+            let connection_id = self.next_connection_id;
+            self.next_connection_id += 1;
+
+            let data = SocketData {
+                handle,
+                send_buffer: VecDeque::new(),
+                write_eof: false,
+                recv_waiter: None,
+                drain_waiter: Vec::new(),
+            };
+            self.socket_data.insert(connection_id, data);
+
+            self.py_tx
+                .send(TransportEvent::ConnectionEstablished {
+                    connection_id,
+                    src_addr,
+                    dst_addr,
+                })
+                .await?;
+        }
+
+        self.iface.device_mut().receive_packet(packet);
+
+        Ok(())
+    }
+
+    fn read_data(&mut self, id: ConnectionId, n: u32, tx: oneshot::Sender<Vec<u8>>) {
+        if let Some(data) = self.socket_data.get_mut(&id) {
+            assert!(data.recv_waiter.is_none());
+            data.recv_waiter = Some((n, tx));
+        } else {
+            // connection is has already been removed because the connection is closed,
+            // so we just drop the tx.
+        }
+    }
+
+    fn write_data(&mut self, id: ConnectionId, buf: Vec<u8>) {
+        if let Some(data) = self.socket_data.get_mut(&id) {
+            data.send_buffer.extend(buf);
+        } else {
+            // connection is has already been removed because the connection is closed,
+            // so we just ignore the write.
+        }
+    }
+
+    fn drain_writer(&mut self, id: ConnectionId, tx: oneshot::Sender<()>) {
+        if let Some(data) = self.socket_data.get_mut(&id) {
+            data.drain_waiter.push(tx);
+        } else {
+            // connection is has already been removed because the connection is closed,
+            // so we just drop the tx.
+        }
+    }
+
+    fn close_connection(&mut self, id: ConnectionId, half_close: bool) {
+        if let Some(data) = self.socket_data.get_mut(&id) {
+            let sock = self.iface.get_socket::<TcpSocket>(data.handle);
+            if half_close {
+                data.write_eof = true;
+            } else {
+                sock.abort();
+            }
+        } else {
+            // connection is already dead.
+        }
+    }
+
+    fn send_datagram(&mut self, data: Vec<u8>, src_addr: SocketAddr, dst_addr: SocketAddr) {
+        let permit = match self.net_tx.try_reserve() {
+            Ok(p) => p,
+            Err(_) => {
+                log::debug!("Channel full, discarding UDP packet.");
+                return;
+            },
+        };
+
+        // We now know that there's space for us to send,
+        // let's painstakingly reassemble the IP packet...
+
+        let udp_repr = UdpRepr {
+            src_port: src_addr.port(),
+            dst_port: dst_addr.port(),
+        };
+
+        let ip_repr: IpRepr = match (src_addr, dst_addr) {
+            (SocketAddr::V4(src_addr), SocketAddr::V4(dst_addr)) => IpRepr::Ipv4(Ipv4Repr {
+                src_addr: Ipv4Address::from(*src_addr.ip()),
+                dst_addr: Ipv4Address::from(*dst_addr.ip()),
+                protocol: IpProtocol::Udp,
+                payload_len: udp_repr.header_len() + data.len(),
+                hop_limit: 255,
+            }),
+            (SocketAddr::V6(src_addr), SocketAddr::V6(dst_addr)) => IpRepr::Ipv6(Ipv6Repr {
+                src_addr: Ipv6Address::from(*src_addr.ip()),
+                dst_addr: Ipv6Address::from(*dst_addr.ip()),
+                next_header: IpProtocol::Udp,
+                payload_len: udp_repr.header_len() + data.len(),
+                hop_limit: 255,
+            }),
+            _ => {
+                log::error!("A datagram's src_addr and dst_addr must agree on IP version.");
+                return;
+            },
+        };
+
+        let buf = vec![0u8; ip_repr.total_len()];
+
+        let mut ip_packet = match ip_repr {
+            IpRepr::Ipv4(repr) => {
+                let mut packet = Ipv4Packet::new_unchecked(buf);
+                repr.emit(&mut packet, &ChecksumCapabilities::default());
+                IpPacket::from(packet)
+            },
+            IpRepr::Ipv6(repr) => {
+                let mut packet = Ipv6Packet::new_unchecked(buf);
+                repr.emit(&mut packet);
+                IpPacket::from(packet)
+            },
+            _ => unreachable!(),
+        };
+
+        udp_repr.emit(
+            &mut UdpPacket::new_unchecked(ip_packet.payload_mut()),
+            &ip_repr.src_addr(),
+            &ip_repr.dst_addr(),
+            data.len(),
+            |buf| buf.copy_from_slice(data.as_slice()),
+            &ChecksumCapabilities::default(),
+        );
+
+        permit.send(NetworkCommand::SendPacket(ip_packet));
     }
 }
 

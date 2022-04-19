@@ -12,8 +12,9 @@ use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::RwLock;
 
-use crate::tcp::{IpPacket, NetworkCommand, NetworkEvent};
+use crate::messages::{IpPacket, NetworkCommand, NetworkEvent};
 
+/// A WireGuard peer. We keep track of the tunnel state and the peer address.
 pub struct WireguardPeer {
     tunnel: Box<Tunn>,
     endpoint: RwLock<Option<SocketAddr>>,
@@ -27,7 +28,7 @@ impl WireguardPeer {
 }
 
 pub struct WireguardServer {
-    pub(crate) socket: UdpSocket,
+    socket: UdpSocket,
     private_key: Arc<X25519SecretKey>,
     public_key: Arc<X25519PublicKey>,
     peers_by_idx: HashMap<u32, Arc<WireguardPeer>>,
@@ -95,7 +96,7 @@ impl WireguardServer {
                 Some(e) = self.net_rx.recv() => {
                     match e {
                         NetworkCommand::SendPacket(packet) => {
-                            self.process_incoming_packet(packet).await?;
+                            self.process_outgoing_packet(packet).await?;
                         }
                     }
                 }
@@ -103,7 +104,11 @@ impl WireguardServer {
         }
     }
 
-    pub fn find_peer_for_datagram(&self, data: &[u8]) -> Option<Arc<WireguardPeer>> {
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    fn find_peer_for_datagram(&self, data: &[u8]) -> Option<Arc<WireguardPeer>> {
         let packet = match Tunn::parse_incoming_packet(&data) {
             Ok(p) => p,
             Err(_) => {
@@ -137,7 +142,8 @@ impl WireguardServer {
         }
     }
 
-    pub async fn process_incoming_datagram(&mut self, data: &[u8], src_addr: SocketAddr) -> Result<()> {
+    /// process WireGuard datagrams and forward the decrypted packets.
+    async fn process_incoming_datagram(&mut self, data: &[u8], src_addr: SocketAddr) -> Result<()> {
         let peer = match self.find_peer_for_datagram(&data) {
             Some(p) => p,
             None => return Ok(()),
@@ -215,7 +221,8 @@ impl WireguardServer {
         Ok(())
     }
 
-    pub async fn process_incoming_packet(&mut self, packet: IpPacket) -> Result<()> {
+    /// process packets and send the encrypted WireGuard datagrams to the peer.
+    async fn process_outgoing_packet(&mut self, packet: IpPacket) -> Result<()> {
         let peer = self
             .peers_by_ip
             .get(&packet.dst_ip())

@@ -6,8 +6,6 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use pretty_hex::pretty_hex;
-
 use smoltcp::iface::{Interface, InterfaceBuilder, Routes, SocketHandle};
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::socket::{Socket, TcpSocket, TcpSocketBuffer, TcpState};
@@ -278,10 +276,9 @@ impl<'a> NetworkTask<'a> {
         let dst_ip = packet.dst_ip();
 
         let tcp_packet = match TcpPacket::new_checked(packet.payload_mut()) {
-            // smoltcp checks the checksum later, so we want to error here already.
-            Ok(p) if p.verify_checksum(&src_ip.into(), &dst_ip.into()) => p,
-            _ => {
-                log::debug!("Received invalid TCP packet: {}", pretty_hex(&packet.payload_mut()));
+            Ok(p) => p,
+            Err(e) => {
+                log::debug!("Received invalid TCP packet: {}", e);
                 return Ok(());
             },
         };

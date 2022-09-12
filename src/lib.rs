@@ -271,7 +271,7 @@ where
         .ok()
         .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
         .map(T::from)
-        .ok_or(PyValueError::new_err("Invalid key."))
+        .ok_or_else(|| PyValueError::new_err("Invalid key."))
 }
 
 /// Generate a WireGuard private key, analogous to the `wg genkey` command.

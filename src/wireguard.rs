@@ -70,7 +70,7 @@ impl WireGuardTaskBuilder {
 
         let tunnel = Tunn::new(
             self.private_key.clone(),
-            public_key.clone(),
+            public_key,
             preshared_key,
             Some(25),
             index,

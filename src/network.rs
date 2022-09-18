@@ -26,7 +26,7 @@ use smoltcp::wire::{
     UdpRepr,
 };
 use smoltcp::Error;
-use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver};
+use tokio::sync::mpsc::{error::TryRecvError, Receiver, Sender, UnboundedReceiver};
 use tokio::sync::{oneshot, Notify};
 
 use crate::messages::{ConnectionId, IpPacket, NetworkCommand, NetworkEvent, TransportCommand, TransportEvent};
@@ -103,6 +103,21 @@ impl<'a> NetworkTask<'a> {
 
             let delay = self.iface.poll_delay(Instant::now());
 
+            // process incoming packets before handling other events:
+            // otherwise the net_rx channel tends to fill up too quickly
+            loop {
+                let r = self.net_rx.try_recv();
+                match r {
+                    Ok(e) => match e {
+                        NetworkEvent::ReceivePacket(packet) => {
+                            self.receive_packet(packet).await?;
+                        },
+                    },
+                    Err(err) if matches!(err, TryRecvError::Empty) => break,
+                    Err(err) => return Err(err)?,
+                }
+            }
+
             tokio::select! {
                 // wait for graceful shutdown
                 _ = self.sd_trigger.notified() => {
@@ -110,7 +125,7 @@ impl<'a> NetworkTask<'a> {
                 },
                 // wait for timeouts when the device is idle
                 _ = async { tokio::time::sleep(delay.unwrap().into()).await }, if delay.is_some() => {},
-                // wait for incoming packages
+                // wait for incoming packets
                 Some(e) = self.net_rx.recv() => {
                     match e {
                         NetworkEvent::ReceivePacket(packet) => {
@@ -118,7 +133,7 @@ impl<'a> NetworkTask<'a> {
                         }
                     }
                 },
-                // wait for outgoing packages
+                // wait for outgoing packets
                 Some(e) = self.py_rx.recv() => {
                     match e {
                         TransportCommand::ReadData(id, n, tx) => {

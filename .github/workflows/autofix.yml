@@ -1,0 +1,23 @@
+name: autofix.ci
+
+on:
+  pull_request:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  autofix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - run: cargo clippy --fix
+      - run: cargo fmt
+
+      - uses: autofix-ci/action@8106fde54b877517c9af2c3d68918ddeaa7bed64

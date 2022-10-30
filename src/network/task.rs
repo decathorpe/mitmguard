@@ -110,30 +110,24 @@ impl<'a> NetworkTask<'a> {
                 _ = async { tokio::time::sleep(delay.unwrap().into()).await }, if delay.is_some() => {},
                 // wait for incoming packages
                 Some(e) = self.net_rx.recv() => {
-                    match e {
-                        NetworkEvent::ReceivePacket(packet) => {
-                            self.receive_packet(packet).await?;
+                    self.network_event(e).await?;
+                    for _ in 1..64 {
+                        if let Ok(e) = self.net_rx.try_recv() {
+                            self.network_event(e).await?;
+                        } else {
+                            break;
                         }
                     }
                 },
                 // wait for outgoing packages
                 Some(e) = self.py_rx.recv() => {
-                    match e {
-                        TransportCommand::ReadData(id, n, tx) => {
-                            self.read_data(id, n, tx);
-                        },
-                        TransportCommand::WriteData(id, buf) => {
-                            self.write_data(id, buf);
-                        },
-                        TransportCommand::DrainWriter(id, tx) => {
-                            self.drain_writer(id, tx);
-                        },
-                        TransportCommand::CloseConnection(id, half_close) => {
-                            self.close_connection(id, half_close);
-                        },
-                        TransportCommand::SendDatagram{data, src_addr, dst_addr} => {
-                            self.send_datagram(data, src_addr, dst_addr);
-                        },
+                    self.python_command(e);
+                    for _ in 1..64 {
+                        if let Ok(e) = self.py_rx.try_recv() {
+                            self.python_command(e);
+                        } else {
+                            break;
+                        }
                     }
                 },
                 // wait for channel capacity
@@ -239,16 +233,26 @@ impl<'a> NetworkTask<'a> {
         Ok(())
     }
 
-    async fn receive_packet(&mut self, packet: IpPacket) -> Result<()> {
-        match packet.transport_protocol() {
-            IpProtocol::Tcp => self.receive_packet_tcp(packet).await,
-            IpProtocol::Udp => self.receive_packet_udp(packet).await,
-            _ => {
-                log::debug!(
-                    "Received IP packet for unknown protocol: {}",
-                    packet.transport_protocol()
-                );
-                Ok(())
+    fn python_command(&mut self, event: TransportCommand) {
+        match event {
+            TransportCommand::ReadData(id, n, tx) => {
+                self.read_data(id, n, tx);
+            }
+            TransportCommand::WriteData(id, buf) => {
+                self.write_data(id, buf);
+            }
+            TransportCommand::DrainWriter(id, tx) => {
+                self.drain_writer(id, tx);
+            }
+            TransportCommand::CloseConnection(id, half_close) => {
+                self.close_connection(id, half_close);
+            }
+            TransportCommand::SendDatagram {
+                data,
+                src_addr,
+                dst_addr,
+            } => {
+                self.send_datagram(data, src_addr, dst_addr);
             }
         }
     }
@@ -339,6 +343,22 @@ impl<'a> NetworkTask<'a> {
 
         self.iface.device_mut().receive_packet(packet);
         Ok(())
+    }
+
+    async fn network_event(&mut self, event: NetworkEvent) -> Result<()> {
+        match event {
+            NetworkEvent::ReceivePacket(packet) => match packet.transport_protocol() {
+                IpProtocol::Tcp => self.receive_packet_tcp(packet).await,
+                IpProtocol::Udp => self.receive_packet_udp(packet).await,
+                _ => {
+                    log::debug!(
+                        "Received IP packet for unknown protocol: {}",
+                        packet.transport_protocol()
+                    );
+                    Ok(())
+                }
+            },
+        }
     }
 
     fn read_data(&mut self, id: ConnectionId, n: u32, tx: oneshot::Sender<Vec<u8>>) {

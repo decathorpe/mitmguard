@@ -203,7 +203,7 @@ impl<'a> NetworkTask<'a> {
                     }
                 }
 
-                log::debug!(
+                log::trace!(
                     "TCP connection {}: socket state {}",
                     connection_id,
                     sock.state()

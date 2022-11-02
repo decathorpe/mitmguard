@@ -436,23 +436,6 @@ impl NetworkTask {
             #[cfg(debug_assertions)]
             log::debug!("Polling virtual network device ...");
 
-            for data in io.socket_data.values_mut() {
-                let socket = io.iface.get_socket::<TcpSocket>(data.handle);
-
-                // send data over the socket
-                if !data.send_buffer.is_empty() && socket.can_send() {
-                    let (a, b) = data.send_buffer.as_slices();
-                    let sent = socket.send_slice(a)? + socket.send_slice(b)?;
-                    data.send_buffer.drain(..sent);
-                }
-
-                // if requested, close socket
-                if data.write_eof && data.send_buffer.is_empty() {
-                    socket.close();
-                    data.write_eof = false;
-                }
-            }
-
             // poll virtual network device
             'poll: loop {
                 match io.iface.poll(Instant::now()) {
@@ -504,6 +487,13 @@ impl NetworkTask {
                     }
                 }
 
+                // send data over the socket
+                if !data.send_buffer.is_empty() && socket.can_send() {
+                    let (a, b) = data.send_buffer.as_slices();
+                    let sent = socket.send_slice(a)? + socket.send_slice(b)?;
+                    data.send_buffer.drain(..sent);
+                }
+
                 // if necessary, drain write buffers:
                 // either when drain has been requested explicitly, or when socket is being closed
                 // TODO: benchmark different variants here. (e.g. only return on half capacity)
@@ -524,6 +514,12 @@ impl NetworkTask {
                     socket.state(),
                     data.addr_tuple,
                 );
+
+                // if requested, close socket
+                if data.write_eof && data.send_buffer.is_empty() {
+                    socket.close();
+                    data.write_eof = false;
+                }
 
                 // if socket is closed, mark connection for removal
                 if socket.state() == TcpState::Closed {

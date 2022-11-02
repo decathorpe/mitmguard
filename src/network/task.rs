@@ -323,6 +323,26 @@ impl NetworkIO {
             }
         }
     }
+
+    fn poll_smol(&mut self) {
+        #[cfg(debug_assertions)]
+        log::debug!("Polling virtual network device ...");
+
+        loop {
+            match self.iface.poll(Instant::now()) {
+                Ok(_) => break,
+                Err(Error::Exhausted) => {
+                    log::debug!("smoltcp: exhausted.");
+                    break;
+                }
+                Err(e) => {
+                    // these can happen for "normal" reasons such as invalid packets,
+                    // we just write a log message and keep going.
+                    log::debug!("smoltcp network error: {}", e)
+                }
+            }
+        }
+    }
 }
 
 pub struct NetworkTask {
@@ -433,24 +453,8 @@ impl NetworkTask {
                 Ok(()) = wait_for_channel_capacity(&self.net_tx), if !can_send_net => {},
             }
 
-            #[cfg(debug_assertions)]
-            log::debug!("Polling virtual network device ...");
-
             // poll virtual network device
-            'poll: loop {
-                match io.iface.poll(Instant::now()) {
-                    Ok(_) => break 'poll,
-                    Err(Error::Exhausted) => {
-                        log::debug!("smoltcp: exhausted.");
-                        break 'poll;
-                    }
-                    Err(e) => {
-                        // these can happen for "normal" reasons such as invalid packets,
-                        // we just write a log message and keep going.
-                        log::debug!("smoltcp network error: {}", e)
-                    }
-                }
-            }
+            io.poll_smol();
 
             #[cfg(debug_assertions)]
             log::debug!("Processing TCP connections ...");
@@ -532,6 +536,9 @@ impl NetworkTask {
                 io.iface.remove_socket(data.handle);
                 io.active_connections.remove(&data.addr_tuple);
             }
+
+            // poll again. we may have new stuff to do.
+            io.poll_smol();
         }
 
         // TODO: process remaining pending data after the shutdown request was received?

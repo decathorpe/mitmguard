@@ -19,7 +19,8 @@ def plot_time(data, name, title):
 
     packet_nums = [*sorted(set(xs))]
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(10.8, 7.2), dpi=100)
+
     for i, size in enumerate(sizes):
         y_means = []
 
@@ -41,7 +42,7 @@ def plot_time(data, name, title):
     ax.set_yscale("log")
     ax.legend()
 
-    fig.savefig(name, dpi=fig.dpi * 2)
+    fig.savefig(name)
 
 
 def plot_throughput(data, name, title):
@@ -51,7 +52,8 @@ def plot_throughput(data, name, title):
 
     packet_nums = [*sorted(set(xs))]
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(10.8, 7.2), dpi=100)
+
     for i, size in enumerate(sizes):
         pps_means = []
 
@@ -77,7 +79,7 @@ def plot_throughput(data, name, title):
     ax.set_xscale("log")
     ax.legend()
 
-    fig.savefig(name, dpi=fig.dpi * 2)
+    fig.savefig(name)
 
 
 def plot2_time(py_data, wg_data, suffix):
@@ -92,7 +94,8 @@ def plot2_time(py_data, wg_data, suffix):
     assert py_sizes == wg_sizes
     packet_nums = [*sorted(set.union(set(py_xs), set(wg_xs)))]
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(10.8, 7.2), dpi=100)
+
     for i, size in enumerate(py_sizes):
         py_means = []
         wg_means = []
@@ -126,7 +129,7 @@ def plot2_time(py_data, wg_data, suffix):
     ax.set_yscale("log")
     ax.legend()
 
-    fig.savefig(f"comp_data_{suffix}.png", dpi=fig.dpi * 2)
+    fig.savefig(f"comp_data_{suffix}.png")
 
 
 def plot2_throughput(py_data, wg_data, suffix):
@@ -141,7 +144,8 @@ def plot2_throughput(py_data, wg_data, suffix):
     assert py_sizes == wg_sizes
     packet_nums = [*sorted(set.union(set(py_xs), set(wg_xs)))]
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(10.8, 7.2), dpi=100)
+
     for i, size in enumerate(py_sizes):
         py_means = []
         wg_means = []
@@ -205,7 +209,7 @@ def plot2_throughput(py_data, wg_data, suffix):
     ax.set_xscale("log")
     ax.legend()
 
-    fig.savefig(f"comp_tp_{suffix}.png", dpi=fig.dpi * 2)
+    fig.savefig(f"comp_tp_{suffix}.png")
 
 
 def stats_throughput(py_data, wg_data, suffix):

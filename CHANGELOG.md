@@ -1,3 +1,9 @@
+## 0.1.20
+
+- Fix memory leak in `TcpStream.read`, which caused any `bytes` object returned by
+  this method never to be garbage collected.
+- Run cleanup of TCP connection handler tasks eagerly instead of only at task shutdown.
+
 ## 0.1.19
 
 - Fix check that prevents initializing multiple TCP connections when receiving duplicate

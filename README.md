@@ -16,8 +16,7 @@ Transparently proxy any device that can be configured as a WireGuard client!
   * one worker thread for the user-space network stack
   * one worker thread for communicating with the Python runtime
 * full support for IPv4 packets (TCP and UDP)
-* basic support for IPv6 packets (TCP and UDP)
-* partial support for IPv6 packets
+* partial support for IPv6 packets (TCP and UDP)
 * Python interface similar to the Python `asyncio` module
 * integration tests in mitmproxy
 

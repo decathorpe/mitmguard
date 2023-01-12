@@ -40,7 +40,7 @@ impl PyInteropTask {
     }
 
     pub async fn run(mut self) -> Result<()> {
-        let mut tcp_connection_handler_tasks = Vec::new();
+        let mut tasks = Vec::new();
 
         loop {
             tokio::select!(
@@ -82,11 +82,10 @@ impl PyInteropTask {
                                     // run Future on a new Tokio task
                                     let handle = tokio::spawn(async {
                                         if let Err(err) = future.await {
-                                            log::error!("TCP connection handler coroutine raised an exception:\n{}", err)}
+                                            log::error!("TCP connection handler coroutine raised an exception:\n{}", err)
                                         }
-                                    );
-
-                                    tcp_connection_handler_tasks.push(handle);
+                                    });
+                                    tasks.push(handle);
 
                                     Ok(())
                                 }) {
@@ -123,12 +122,31 @@ impl PyInteropTask {
                     }
                 },
             );
+
+            // clean up TCP connection handler coroutines that have already returned
+            let mut still_running = Vec::new();
+            for handle in tasks.drain(..) {
+                if handle.is_finished() {
+                    // Future is already finished: just await;
+                    // Python exceptions are already logged by the wrapper coroutine
+                    if let Err(err) = handle.await {
+                        log::warn!(
+                            "TCP connection handler coroutine could not be joined: {}",
+                            err
+                        );
+                    }
+                } else {
+                    still_running.push(handle);
+                }
+            }
+
+            tasks.extend(still_running);
         }
 
         log::debug!("Python interoperability task shutting down.");
 
         // clean up TCP connection handler coroutines
-        for handle in tcp_connection_handler_tasks {
+        for handle in tasks {
             if handle.is_finished() {
                 // Future is already finished: just await;
                 // Python exceptions are already logged by the wrapper coroutine

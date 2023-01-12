@@ -202,6 +202,7 @@ def plot2_throughput(py_data, wg_data, suffix):
 
     ax.set_title("Echo server throughput comparison")
     ax.set_xlim(min(packet_nums) / 2, 2 * max(packet_nums))
+    ax.set_ylim(0, max([*py_pps] + [*wg_pps]) * 1.2)
 
     ax.set_xlabel("Number of packets")
     ax.set_ylabel("Throughput /(packets/s)")

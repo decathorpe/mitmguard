@@ -1,3 +1,8 @@
+## 0.1.21
+
+- Update to pyo3 v0.18.2, which includes a fix for a rare race condition.
+- Minor fix for wrong method signature in stub file.
+
 ## 0.1.20
 
 - Fix memory leak in `TcpStream.read`, which caused any `bytes` object returned by

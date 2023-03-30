@@ -101,7 +101,7 @@ impl TcpStream {
     /// Query the TCP stream for details of the underlying network connection.
     ///
     /// Supported values: `peername`, `sockname`, `original_dst`, and `original_src`.
-    #[args(default = "None")]
+    #[pyo3(signature = (name, default=None))]
     fn get_extra_info(
         &self,
         py: Python,

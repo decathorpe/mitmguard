@@ -1,3 +1,9 @@
+## 0.1.22
+
+- Pin `x25519-dalek` dependency to `=2.0.0-pre.1` to fix build issues with recent
+  releases that contain breaking changes.
+- Include `Cargo.lock` in sdist archives.
+
 ## 0.1.21
 
 - Update to pyo3 v0.18.2, which includes a fix for a rare race condition.

@@ -9,6 +9,10 @@
 
 Transparently proxy any device that can be configured as a WireGuard client!
 
+> [!IMPORTANT]
+> This project is no longer maintained, its functionality has been subsumed into
+> [mitmproxy_rs](https://github.com/mitmproxy/mitmproxy_rs).
+
 ## DONE
 
 * multithreaded / asynchronous WireGuard server using tokio:
